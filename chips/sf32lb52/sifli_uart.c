@@ -53,7 +53,7 @@ void arm_serialinit(void)
 
 }
 
-int up_putc(int ch)
+void up_putc(int ch)
 {
-  return ch;
+
 }
