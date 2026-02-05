@@ -18,9 +18,40 @@
 #
 # ##############################################################################
 
-set(SRCS sifli_start.c sifli_irq.c sifli_uart.c
+set(SRCS sifli_start.c sifli_irq.c sifli_uart.c sifli_lowput.c
          sifli_oneshot.c sifli_allocateheap.c)
 
-target_sources(arch PRIVATE ${SRCS})
+# Add all HAL source files
+file(GLOB HAL_SRCS ${NUTTX_CHIP_ABS_DIR}/../drivers/hal/*.c)
+
+# For SF32LB52X, exclude certain files based on SConscript rules
+list(REMOVE_ITEM HAL_SRCS 
+    ${NUTTX_CHIP_ABS_DIR}/../drivers/hal/bf0_hal_audcodec.c
+    ${NUTTX_CHIP_ABS_DIR}/../drivers/hal/bf0_hal_qspi.c
+    ${NUTTX_CHIP_ABS_DIR}/../drivers/hal/bf0_hal_qspi_ex.c)
+
+# Add system initialization file
+set(SYSTEM_SRCS ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/sf32lb52x/Templates/system_bf0_ap.c
+                ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/sf32lb52x/bf0_pin_const.c)
+
+target_sources(arch PRIVATE ${SRCS} ${HAL_SRCS} ${SYSTEM_SRCS})
+
+
+target_compile_definitions(arch PRIVATE SOC_BF0_HCPU 
+                                        SF32LB52X
+                                        HAL_TICK_PER_SECOND=1000
+                                        USE_HAL_DRIVER
+                                        USE_SERIALDRIVER)
 
 target_include_directories(arch PRIVATE ${NUTTX_CHIP_ABS_DIR}/include)
+target_include_directories(arch PRIVATE ${NUTTX_CHIP_ABS_DIR}/../drivers/Include)
+target_include_directories(arch PRIVATE ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/Include)
+target_include_directories(arch PRIVATE ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/sf32lb52x)
+target_include_directories(arch PRIVATE ${NUTTX_CHIP_ABS_DIR}/../external/CMSIS/Include)
+target_include_directories(arch PRIVATE ${NUTTX_CHIP_ABS_DIR}/../boards/include/config/sf32lb52x)
+target_include_directories(arch PRIVATE ${NUTTX_BOARD_ABS_DIR}/include)
+
+# Suppress warnings for HAL driver files
+target_compile_options(arch PRIVATE 
+    $<$<COMPILE_LANGUAGE:C>:-w>
+    $<$<COMPILE_LANGUAGE:CXX>:-w>)

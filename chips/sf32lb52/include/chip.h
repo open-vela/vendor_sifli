@@ -26,9 +26,17 @@
  ****************************************************************************/
 
 #include <nuttx/config.h>
+#include <arch/irq.h>
 
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
+#define NVIC_SYSH_PRIORITY_MIN     0xf0 /* All bits set in minimum priority */
+#define NVIC_SYSH_PRIORITY_DEFAULT 0x80 /* Midpoint is the default */
+#define NVIC_SYSH_PRIORITY_MAX     0x00 /* Zero is maximum priority */
+#define NVIC_SYSH_PRIORITY_STEP    0x10 /* Four bits of interrupt priority used */
+
+/* This is an ARMv8-M Cortex-M33 chip - define the number of peripheral interrupts */
+#define ARMV8M_PERIPHERAL_INTERRUPTS (NR_IRQS - NVIC_IRQ_FIRST)
 
 #endif /* __VENDOR_SIFLI_CHIP_SF32LB52_INCLUDE_CHIP_H */

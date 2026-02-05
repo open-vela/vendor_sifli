@@ -28,10 +28,17 @@
 #include <nuttx/config.h>
 #include <arch/irq.h>
 
+#ifdef CONFIG_DEV_CONSOLE
+#  undef USE_SERIALDRIVER
+#  define USE_SERIALDRIVER 1
+#endif
+
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
 
-#define ARMV7M_PERIPHERAL_INTERRUPTS (NR_IRQS - NVIC_IRQ_FIRST)
+/* This is an ARMv8-M Cortex-M33 chip */
+
+#define ARMV8M_PERIPHERAL_INTERRUPTS (NR_IRQS - NVIC_IRQ_FIRST)
 
 #endif /* __VENDOR_AMBIQ_CHIP_SF32LB52_CHIP_H */

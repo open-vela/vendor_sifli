@@ -26,6 +26,17 @@
 #include <nuttx/arch.h>
 
 #include "chip.h"
+#include "arm_internal.h"
+
+/****************************************************************************
+ * Pre-processor Definitions
+ ****************************************************************************/
+
+/* SRAM memory configuration for SF32LB52 */
+
+#define SRAM_START  0x20000000
+#define SRAM_SIZE   0x00080000    /* 512 KB */
+#define SRAM_END    (SRAM_START + SRAM_SIZE)
 
 /****************************************************************************
  * Private Types
@@ -80,7 +91,10 @@
 
 void up_allocate_heap(FAR void **heap_start, size_t *heap_size)
 {
-
+  /* The heap starts at g_idle_topstack and extends to the end of SRAM */
+  
+  *heap_start = (FAR void *)g_idle_topstack;
+  *heap_size  = SRAM_END - g_idle_topstack;
 }
 
 /******************************************************************************

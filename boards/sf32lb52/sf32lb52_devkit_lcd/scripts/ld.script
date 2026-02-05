@@ -1,5 +1,5 @@
 /****************************************************************************
- * vendor/sifli/boards/sf32lb52_devkit_lcd/scripts/flash.ld
+ * vendor/sifli/boards/sf32lb52-nano/scripts/ld.script
  *
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -20,18 +20,28 @@
 
 MEMORY
 {
-  flash (rx) : ORIGIN = 0x08000000, LENGTH = 256K
-  sram (rwx) : ORIGIN = 0x20000000, LENGTH = 64K
+  flash (rx) : ORIGIN = 0x12010000, LENGTH = 16M
+  sram (rwx) : ORIGIN = 0x20000000, LENGTH = 512K
 }
 
 OUTPUT_ARCH(arm)
 EXTERN(_vectors)
 ENTRY(_stext)
+
 SECTIONS
 {
+    /* Discard build-id to ensure vectors start at flash base */
+    /DISCARD/ : {
+        *(.note.gnu.build-id)
+    }
+
     .text : {
         _stext = ABSOLUTE(.);
-        *(.vectors)
+        /* Ensure vector table is properly aligned (must be at flash start) */
+        . = ALIGN(512);
+        KEEP(*(.vectors))
+        /* Add padding after vectors to match SDK layout */
+        . = ALIGN(4);
         *(.text .text.*)
         *(.fixup)
         *(.gnu.warning)
@@ -42,14 +52,50 @@ SECTIONS
         *(.got)
         *(.gcc_except_table)
         *(.gnu.linkonce.r.*)
-        _etext = ABSOLUTE(.);
-    } > flash
 
-    .init_section : {
-        _sinit = ABSOLUTE(.);
-        KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*) SORT_BY_INIT_PRIORITY(.ctors.*)))
-        KEEP(*(.init_array EXCLUDE_FILE(*crtbegin.o *crtbegin?.o *crtend.o *crtend?.o) .ctors))
-        _einit = ABSOLUTE(.);
+        KEEP(*(.init))
+        KEEP(*(.fini))
+
+        /* Section information for finsh shell */
+        . = ALIGN(4);
+        __fsymtab_start = .;
+        KEEP(*(FSymTab))
+        __fsymtab_end = .;
+
+        . = ALIGN(4);
+        __vsymtab_start = .;
+        KEEP(*(VSymTab))
+        __vsymtab_end = .;
+
+        . = ALIGN(4);
+        __rt_utest_tc_tab_start = .;
+        KEEP(*(UtestTcTab))
+        __rt_utest_tc_tab_end = .;
+
+        /* Section information for initial */
+        . = ALIGN(4);
+        __rt_init_start = .;
+        KEEP(*(SORT(.rti_fn*)))
+        __rt_init_end = .;
+
+        . = ALIGN(4);
+        __sifli_reg_start__ = .;
+        KEEP(*(SORT(.sifli_reg*)))
+        __sifli_reg_end__ = .;
+
+        . = ALIGN(4);
+        __bt_sifli_reg_start__ = .;
+        KEEP(*(SORT(.bt_sifli_reg*)))
+        __bt_sifli_reg_end__ = .;
+
+        /* Section information for modules */
+        . = ALIGN(4);
+        __rtmsymtab_start = .;
+        KEEP(*(RTMSymTab))
+        __rtmsymtab_end = .;
+
+        KEEP(*(.eh_frame*))
+        _etext = ABSOLUTE(.);
     } > flash
 
     .ARM.extab : {
@@ -61,6 +107,23 @@ SECTIONS
         *(.ARM.exidx*)
     } > flash
     __exidx_end = ABSOLUTE(.);
+
+    .copy.table : {
+        . = ALIGN(4);
+        __copy_table_start__ = .;
+        LONG (LOADADDR(.data))
+        LONG (ADDR(.data))
+        LONG (SIZEOF(.data))
+        __copy_table_end__ = .;
+    } > flash
+
+    .zero.table : {
+        . = ALIGN(4);
+        __zero_table_start__ = .;
+        LONG (__bss_start__)
+        LONG (__bss_end__ - __bss_start__)
+        __zero_table_end__ = .;
+    } > flash
 
     .tdata : {
         _stdata = ABSOLUTE(.);
@@ -75,6 +138,7 @@ SECTIONS
     } > flash
 
     _eronly = ABSOLUTE(.);
+    __etext = ALIGN(4);
 
     /* The RAM vector table (if present) should lie at the beginning of SRAM */
 
@@ -84,21 +148,67 @@ SECTIONS
 
     .data : {
         _sdata = ABSOLUTE(.);
-        *(.data .data.*)
+        __data_start__ = .;
+        *(vtable)
+        *(.data)
+        *(.data.*)
         *(.gnu.linkonce.d.*)
         CONSTRUCTORS
+
         . = ALIGN(4);
+        /* preinit data */
+        PROVIDE_HIDDEN (__preinit_array_start = .);
+        KEEP(*(.preinit_array))
+        PROVIDE_HIDDEN (__preinit_array_end = .);
+
+        . = ALIGN(4);
+        /* init data */
+        _sinit = ABSOLUTE(.);
+        PROVIDE(__ctors_start__ = .);
+        PROVIDE_HIDDEN (__init_array_start = .);
+        KEEP(*(SORT(.ctors.*)))
+        KEEP(*(.ctors))
+        KEEP(*(SORT(.init_array.*)))
+        KEEP(*(.init_array))
+        _einit = ABSOLUTE(.);
+        PROVIDE_HIDDEN (__init_array_end = .);
+        PROVIDE(__ctors_end__ = .);
+
+        . = ALIGN(4);
+        /* fini data */
+        PROVIDE(__dtors_start__ = .);
+        PROVIDE_HIDDEN (__fini_array_start = .);
+        KEEP(*(SORT(.dtors.*)))
+        KEEP(*(.dtors))
+        KEEP(*(SORT(.fini_array.*)))
+        KEEP(*(.fini_array))
+        PROVIDE_HIDDEN (__fini_array_end = .);
+        PROVIDE(__dtors_end__ = .);
+
+        KEEP(*(.jcr*))
+        . = ALIGN(4);
+        __data_end__ = .;
         _edata = ABSOLUTE(.);
     } > sram AT > flash
 
     .bss : {
+        . = ALIGN(4);
         _sbss = ABSOLUTE(.);
-        *(.bss .bss.*)
+        __bss_start__ = .;
+        *(.bss)
+        *(.bss.*)
         *(.gnu.linkonce.b.*)
         *(COMMON)
         . = ALIGN(4);
+        __bss_end__ = .;
         _ebss = ABSOLUTE(.);
     } > sram
+
+    /* Heap starts after BSS */
+    . = ALIGN(4);
+    __end__ = .;
+    PROVIDE(end = .);
+    PROVIDE(_end = .);
 
     /* Stabs debugging sections. */
     .stab 0 : { *(.stab) }

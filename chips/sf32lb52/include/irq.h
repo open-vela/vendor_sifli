@@ -35,8 +35,6 @@
 
 #include <sys/types.h>
 
-#include <arch/chip/irq.h>
-
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
@@ -46,9 +44,12 @@
 /* IRQ numbers.  The IRQ number corresponds vector number and hence map
  * directly to bits in the INTC.  This does, however, waste several
  * words of memory in the IRQ to handle mapping tables.
+ *
+ * The sf32lb52x has up to 98 peripheral interrupts (see register.h),
+ * plus 16 internal ARM exceptions, so NR_IRQS must be at least 115.
  */
 
-#define NR_IRQS (64)
+#define NR_IRQS (115)
 
 /* NVIC priority levels */
 
