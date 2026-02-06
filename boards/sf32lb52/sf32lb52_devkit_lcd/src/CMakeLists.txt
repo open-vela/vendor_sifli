@@ -18,7 +18,7 @@
 #
 # ##############################################################################
 
-set(SRCS sifli_ap.c)
+set(SRCS sifli_ap.c sifli_gpio.c)
 
 nuttx_add_romfs(
   NAME
@@ -36,3 +36,19 @@ nuttx_add_romfs(
 target_link_libraries(board PRIVATE romfs_etc)
 
 target_sources(board PRIVATE ${SRCS})
+
+target_compile_definitions(board PRIVATE SOC_BF0_HCPU
+                                         SF32LB52X
+                                         HAL_TICK_PER_SECOND=1000
+                                         USE_HAL_DRIVER)
+
+target_include_directories(board PRIVATE ${NUTTX_CHIP_ABS_DIR}/include)
+target_include_directories(board PRIVATE ${NUTTX_CHIP_ABS_DIR}/../drivers/Include)
+target_include_directories(board PRIVATE ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/Include)
+target_include_directories(board PRIVATE ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/sf32lb52x)
+target_include_directories(board PRIVATE ${NUTTX_CHIP_ABS_DIR}/../external/CMSIS/Include)
+target_include_directories(board PRIVATE ${NUTTX_CHIP_ABS_DIR}/../boards/include/config/sf32lb52x)
+
+target_compile_options(board PRIVATE
+    $<$<COMPILE_LANGUAGE:C>:-w>
+    $<$<COMPILE_LANGUAGE:CXX>:-w>)

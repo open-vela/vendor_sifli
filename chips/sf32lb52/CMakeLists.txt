@@ -19,7 +19,7 @@
 # ##############################################################################
 
 set(SRCS sifli_start.c sifli_irq.c sifli_uart.c sifli_lowput.c
-         sifli_oneshot.c sifli_allocateheap.c)
+         sifli_oneshot.c sifli_allocateheap.c sifli_gpio.c)
 
 # Add all HAL source files
 file(GLOB HAL_SRCS ${NUTTX_CHIP_ABS_DIR}/../drivers/hal/*.c)

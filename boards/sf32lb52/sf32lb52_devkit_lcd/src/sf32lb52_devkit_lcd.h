@@ -25,7 +25,24 @@
  * Pre-processor Definitions
  ****************************************************************************/
 
+/* Number of GPIO pins */
+#define BOARD_NGPIOIN     1
+#define BOARD_NGPIOOUT    1
+#define BOARD_NGPIOINT    1
+
+#define GPIO_IN1          (GET_PIN_2(hwp_gpio1, 34))
+#define GPIO_OUT1         (GET_PIN_2(hwp_gpio1, 26))
+
+#define GPIO_INT1         (GET_PIN_2(hwp_gpio1, 34))
+
+
+
 int sf32lb52_devkit_lcd_bringup(void);
+
+
+#ifdef CONFIG_DEV_GPIO
+int sifli_gpio_initialize(void);
+#endif
 
 #endif /* __VENDOR_SIFLI_BOARDS_SF32LB52_SF32LB52_DEVKIT_LCD_SF32LB52_DEVKIT_LCD_H */
 
