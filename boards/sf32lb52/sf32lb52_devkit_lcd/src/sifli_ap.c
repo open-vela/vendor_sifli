@@ -23,7 +23,13 @@
  ****************************************************************************/
 // specify chip arch internal header
 // eg: arm_internal.h riscv_internal.h
+#include <debug.h>
+
 #include "arm_internal.h"
+
+#ifdef CONFIG_ADC
+extern int sf32lb_adc_init(const char *devpath);
+#endif
 
 /****************************************************************************
  * Public Functions
@@ -45,7 +51,18 @@
 
 int sf32lb52_devkit_lcd_bringup(void)
 {
-  return OK;
+  int ret = OK;
+
+#ifdef CONFIG_ADC
+  ret = sf32lb_adc_init("/dev/adc0");
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: sf32lb_adc_init failed: %d\n", ret);
+      return ret;
+    }
+#endif
+
+  return ret;
 }
 
 /****************************************************************************
