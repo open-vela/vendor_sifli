@@ -23,12 +23,23 @@
  ****************************************************************************/
 // specify chip arch internal header
 // eg: arm_internal.h riscv_internal.h
+#include <nuttx/config.h>
+
+#include <errno.h>
 #include <debug.h>
+
+#if defined(CONFIG_RTC) && defined(CONFIG_RTC_DRIVER)
+#  include <nuttx/timers/rtc.h>
+#endif
 
 #include "arm_internal.h"
 
 #ifdef CONFIG_ADC
 extern int sf32lb_adc_init(const char *devpath);
+#endif
+
+#if defined(CONFIG_RTC) && defined(CONFIG_RTC_DRIVER)
+#  include "sf32lb_rtc.h"
 #endif
 
 /****************************************************************************
@@ -53,11 +64,29 @@ int sf32lb52_devkit_lcd_bringup(void)
 {
   int ret = OK;
 
+#if defined(CONFIG_RTC) && defined(CONFIG_RTC_DRIVER)
+  struct rtc_lowerhalf_s *rtclower = NULL;
+
+  rtclower = sf32lb_rtc_lowerhalf();
+  if (rtclower == NULL)
+    {
+      serr("ERROR: Failed to instantiate RTC lower-half\n");
+      return -ENOMEM;
+    }
+
+  ret = rtc_initialize(0, rtclower);
+  if (ret < 0)
+    {
+      serr("ERROR: rtc_initialize failed: %d\n", ret);
+      return ret;
+    }
+#endif
+
 #ifdef CONFIG_ADC
   ret = sf32lb_adc_init("/dev/adc0");
   if (ret < 0)
     {
-      syslog(LOG_ERR, "ERROR: sf32lb_adc_init failed: %d\n", ret);
+      serr("ERROR: sf32lb_adc_init failed: %d\n", ret);
       return ret;
     }
 #endif
