@@ -29,6 +29,10 @@ if(CONFIG_RTC)
     list(APPEND SRCS sf32lb_rtc.c)
 endif()
 
+if(CONFIG_WATCHDOG)
+    list(APPEND SRCS sf32lb_iwdg.c)
+endif()
+
 # Add all HAL source files
 file(GLOB HAL_SRCS ${NUTTX_CHIP_ABS_DIR}/../drivers/hal/*.c)
 
