@@ -21,6 +21,10 @@
 set(SRCS sifli_start.c sifli_irq.c sifli_uart.c sifli_lowput.c
          sifli_oneshot.c sifli_allocateheap.c sifli_gpio.c)
 
+if(CONFIG_ADC)
+    list(APPEND SRCS sf32lb_adc.c)
+endif()
+
 # Add all HAL source files
 file(GLOB HAL_SRCS ${NUTTX_CHIP_ABS_DIR}/../drivers/hal/*.c)
 
@@ -32,7 +36,8 @@ list(REMOVE_ITEM HAL_SRCS
 
 # Add system initialization file
 set(SYSTEM_SRCS ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/sf32lb52x/Templates/system_bf0_ap.c
-                ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/sf32lb52x/bf0_pin_const.c)
+                ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/sf32lb52x/bf0_pin_const.c
+                ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/sf32lb52x/lcpu_config_type.c)
 
 target_sources(arch PRIVATE ${SRCS} ${HAL_SRCS} ${SYSTEM_SRCS})
 
