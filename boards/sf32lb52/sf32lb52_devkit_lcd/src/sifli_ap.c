@@ -38,6 +38,10 @@
 extern int sf32lb_adc_init(const char *devpath);
 #endif
 
+#ifdef CONFIG_WATCHDOG
+extern void sf32lb_iwdginitialize(const char *devpath);
+#endif
+
 #if defined(CONFIG_RTC) && defined(CONFIG_RTC_DRIVER)
 #  include "sf32lb_rtc.h"
 #endif
@@ -89,6 +93,10 @@ int sf32lb52_devkit_lcd_bringup(void)
       serr("ERROR: sf32lb_adc_init failed: %d\n", ret);
       return ret;
     }
+#endif
+
+#ifdef CONFIG_WATCHDOG
+  sf32lb_iwdginitialize("/dev/watchdog0");
 #endif
 
   return ret;
