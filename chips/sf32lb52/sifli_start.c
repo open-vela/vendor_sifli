@@ -75,8 +75,8 @@ int arm_lowprintf(const char *fmt, ...)
   return ret;
 }
 
-/* Early syslog implementation before full syslog is initialized */
-int __arch_syslog(int priority, const char *fmt, ...)
+/* Early/critical-context logger used by chip debug override. */
+int sifli_arch_syslog(int priority, const char *fmt, ...)
 {
   va_list ap;
   char buf[256];
