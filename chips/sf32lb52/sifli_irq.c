@@ -75,14 +75,6 @@ static int sifli_nmi(int irq, void *context, void *arg)
   return 0;
 }
 
-static int sifli_pendsv(int irq, void *context, void *arg)
-{
-  up_irq_save();
-  arm_lowprintf("PANIC!!! PendSV received\n");
-  PANIC();
-  return 0;
-}
-
 static int sifli_dbgmonitor(int irq, void *context, void *arg)
 {
   up_irq_save();
@@ -242,7 +234,6 @@ void up_irqinitialize(void)
 #endif
       irq_attach(BusFault_IRQn+16, arm_busfault, NULL);
       irq_attach(UsageFault_IRQn+16, arm_usagefault, NULL);
-      irq_attach(PendSV_IRQn+16, sifli_pendsv, NULL);
       irq_attach(DebugMonitor_IRQn+16, sifli_dbgmonitor, NULL);
       irq_attach(0, sifli_reserved, NULL);
 #endif

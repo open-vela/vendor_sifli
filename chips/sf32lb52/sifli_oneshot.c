@@ -28,11 +28,13 @@
 #include <time.h>
 #include <debug.h>
 #include <nuttx/arch.h>
+#include <nuttx/timers/arch_timer.h>
 #include <arch/board/board.h>
 
 #include "nvic.h"
 #include "clock/clock.h"
 #include "arm_internal.h"
+#include "systick.h"
 #include "chip.h"
 #include "bf0_hal.h"
 #include "tim_config.h"
@@ -785,20 +787,31 @@ int up_alarm_start(const struct timespec *ts)
  *
  ****************************************************************************/
 
-static int sifli_timerisr(int irq, void *context, void *arg)
-{
-  /* Process timer interrupt */
-  nxsched_process_timer();
-  return 0;
-}
-
 void up_timer_initialize(void)
 {
-  /* Attach the timer interrupt handler */
-  irq_attach(NVIC_IRQ_SYSTICK, (xcpt_t)sifli_timerisr, NULL);
+  FAR struct timer_lowerhalf_s *lower;
+  uint32_t systick_clock;
 
-  /* Enable SysTick interrupt */
-  up_enable_irq(NVIC_IRQ_SYSTICK);
+  /* In non-tickless mode with CONFIG_TIMER_ARCH enabled, hook SysTick
+   * through the common timer lower-half path so timekeeping and sleep APIs
+   * share one consistent backend.
+   */
+
+  systick_clock = HAL_RCC_GetHCLKFreq(CORE_ID_HCPU);
+  if (systick_clock == 0)
+    {
+      tmrerr("ERROR: invalid HCLK for SysTick\n");
+      return;
+    }
+
+  lower = systick_initialize(true, systick_clock, -1);
+  if (lower == NULL)
+    {
+      tmrerr("ERROR: systick_initialize failed\n");
+      return;
+    }
+
+  up_timer_set_lowerhalf(lower);
 }
 
 #endif /* CONFIG_SCHED_TICKLESS */
