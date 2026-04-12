@@ -38,3 +38,7 @@ CHIP_CSRCS += sifli_oneshot.c sifli_allocateheap.c
 ifeq ($(CONFIG_ADC),y)
 CHIP_CSRCS += sf32lb_adc.c
 endif
+
+ifeq ($(CONFIG_RTC),y)
+CHIP_CSRCS += sf32lb_rtc.c
+endif
