@@ -5705,8 +5705,21 @@ static HAL_StatusTypeDef I2C_Master_DMAReload(struct __I2C_HandleTypeDef *hi2c)
   */
 static HAL_StatusTypeDef I2C_WaitOnFlagUntilTimeout(I2C_HandleTypeDef *hi2c, uint32_t Flag, FlagStatus Status, uint32_t Timeout, uint32_t Tickstart)
 {
+    uint32_t loop_count = 0;
+    const uint32_t MAX_LOOP_COUNT = 1000000; /* Prevent infinite loop */
+    
     while (__HAL_I2C_GET_FLAG(hi2c, Flag) == Status)
     {
+        /* Prevent infinite loop if HAL_GetTick() not working */
+        if (++loop_count > MAX_LOOP_COUNT)
+        {
+            hi2c->ErrorCode |= HAL_I2C_ERROR_TIMEOUT;
+            hi2c->State = HAL_I2C_STATE_READY;
+            hi2c->Mode = HAL_I2C_MODE_NONE;
+            HAL_I2C_LOG("I2C timeout: loop count exceeded, Flag=0x%x", Flag);
+            return HAL_ERROR;
+        }
+        
         /* Check for the Timeout */
         if (Timeout != HAL_MAX_DELAY)
         {
@@ -5751,8 +5764,19 @@ static HAL_StatusTypeDef I2C_WaitOnFlagUntilTimeout(I2C_HandleTypeDef *hi2c, uin
   */
 static HAL_StatusTypeDef I2C_WaitOnFlagAndDetectError(I2C_HandleTypeDef *hi2c, uint32_t Flag, FlagStatus Status, uint32_t ErrFlags, uint32_t Timeout, uint32_t Tickstart)
 {
+    uint32_t loop_count = 0;
+    const uint32_t MAX_LOOP_COUNT = 1000000; /* Prevent infinite loop */
+    
     while (__HAL_I2C_GET_FLAG(hi2c, Flag) == Status)
     {
+        /* Prevent infinite loop if HAL_GetTick() or I2C hardware not working */
+        if (++loop_count > MAX_LOOP_COUNT)
+        {
+            hi2c->ErrorCode |= HAL_I2C_ERROR_TIMEOUT;
+            HAL_I2C_LOG("I2C timeout: loop count exceeded, Flag=0x%x, SR=0x%x", Flag, hi2c->Instance->SR);
+            return HAL_ERROR;
+        }
+        
         /* Check for the Timeout */
         if (Timeout != HAL_MAX_DELAY)
         {
