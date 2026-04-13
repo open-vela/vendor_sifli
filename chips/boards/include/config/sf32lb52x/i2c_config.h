@@ -7,7 +7,7 @@
 #ifndef __I2C_CONFIG_H__
 #define __I2C_CONFIG_H__
 
-#include <rtconfig.h>
+#include <sfconfig.h>
 #include "bf0_hal_rcc.h"
 
 #ifdef __cplusplus

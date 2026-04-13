@@ -7,7 +7,7 @@
 #ifndef __SPI_CONFIG_H__
 #define __SPI_CONFIG_H__
 
-#include <rtconfig.h>
+#include <sfconfig.h>
 
 #ifdef __cplusplus
 extern "C" {

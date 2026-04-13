@@ -19,7 +19,8 @@
 # ##############################################################################
 
 set(SRCS sifli_start.c sifli_irq.c sifli_uart.c sifli_lowput.c
-         sifli_oneshot.c sifli_allocateheap.c sifli_gpio.c)
+         sifli_oneshot.c sifli_allocateheap.c sifli_gpio.c sifli_i2c.c
+         sifli_spi.c)
 
 if(CONFIG_ADC)
     list(APPEND SRCS sf32lb_adc.c)
