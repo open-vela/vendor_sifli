@@ -24,9 +24,16 @@
 
 #include <nuttx/config.h>
 #include <nuttx/arch.h>
+#include <nuttx/kmalloc.h>
+
+#include <stdbool.h>
 
 #include "chip.h"
 #include "arm_internal.h"
+#include "bf0_hal.h"
+
+extern void BSP_PIN_Init(void);
+extern void BSP_Power_Up(bool is_deep_sleep);
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -38,6 +45,11 @@
 #define SRAM_SIZE   0x00080000    /* 512 KB */
 #define SRAM_END    (SRAM_START + SRAM_SIZE)
 
+/* PSRAM memory configuration for SF32LB52 (MPI1 SBUS) */
+
+#define PSRAM_START 0x60000000
+#define PSRAM_SIZE  0x00800000    /* 8 MB */
+
 /****************************************************************************
  * Private Types
  ****************************************************************************/
@@ -46,9 +58,63 @@
  * Private Data
  ****************************************************************************/
 
+#ifdef CONFIG_BSP_USING_PSRAM
+static bool g_psram_ready;
+
+static void sifli_psram_preinit(void)
+{
+  qspi_configure_t qspi_cfg =
+  {
+    .Instance = hwp_qspi1,
+    .SpiMode  = CONFIG_BSP_QSPI1_MODE,
+    .msize    = CONFIG_BSP_QSPI1_MEM_SIZE,
+    .base     = QSPI1_MEM_BASE,
+  };
+  static FLASH_HandleTypeDef psram_handle;
+
+  /* Enable 1.8V LDO required by PSRAM. */
+
+  HAL_PMU_ConfigPeriLdo(PMU_PERI_LDO_1V8, true, true);
+
+  /* Use SYSCLK for early boot safety. DLL2 path is enabled later by HAL. */
+
+  HAL_RCC_HCPU_ClockSelect(RCC_CLK_MOD_FLASH1, RCC_CLK_FLASH_SYSCLK);
+
+  /* Use configured PSRAM mode directly to avoid early-boot PID dependency. */
+
+  if (qspi_cfg.SpiMode == SPI_MODE_NOR)
+    {
+      g_psram_ready = false;
+      return;
+    }
+
+  /* Avoid early power-mode query here; HAL_Init will handle PM state later. */
+
+  psram_handle.wakeup = 0;
+
+  /* Keep divider aligned with existing board implementation. */
+
+  g_psram_ready = (HAL_MPI_PSRAM_Init(&psram_handle, &qspi_cfg, 2) == HAL_OK);
+}
+#endif
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
+
+void HAL_MspInit(void)
+{
+  BSP_PIN_Init();
+  BSP_Power_Up(true);
+}
+
+void HAL_PreInit(void)
+{
+#ifdef CONFIG_BSP_USING_PSRAM
+  HAL_MspInit();
+  sifli_psram_preinit();
+#endif
+}
 
 /****************************************************************************
  * Name: up_allocate_heap/up_allocate_kheap
@@ -109,6 +175,11 @@ void up_allocate_heap(FAR void **heap_start, size_t *heap_size)
 #if CONFIG_MM_REGIONS > 1
 void arm_addregion(void)
 {
-
+#ifdef CONFIG_BSP_USING_PSRAM
+  if (g_psram_ready)
+    {
+      kumm_addregion((void *)PSRAM_START, PSRAM_SIZE);
+    }
+#endif
 }
 #endif

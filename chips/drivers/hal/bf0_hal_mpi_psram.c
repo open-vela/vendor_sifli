@@ -121,7 +121,12 @@ __HAL_ROM_USED HAL_StatusTypeDef HAL_OPI_PSRAM_Init(FLASH_HandleTypeDef *hflash,
 
 #if defined(SF32LB56X) || defined(SF32LB52X)
 
-    HAL_MPI_OPSRAM_CAL_DELAY(hflash, &sck_dly, &dqs_dly);
+    if (HAL_MPI_OPSRAM_CAL_DELAY(hflash, &sck_dly, &dqs_dly) != HAL_OK)
+    {
+        /* Fall back to conservative delays if calibration cannot complete. */
+        dqs_dly = 0x0a;
+        sck_dly = 0x0a;
+    }
 #endif
 
     //TODO: delay
@@ -254,7 +259,12 @@ __HAL_ROM_USED HAL_StatusTypeDef HAL_LEGACY_PSRAM_Init(FLASH_HandleTypeDef *hfla
 
 #if defined(SF32LB56X) || defined(SF32LB52X)
 
-    HAL_MPI_OPSRAM_CAL_DELAY(hflash, &sck_dly, &dqs_dly);
+    if (HAL_MPI_OPSRAM_CAL_DELAY(hflash, &sck_dly, &dqs_dly) != HAL_OK)
+    {
+        /* Fall back to conservative delays if calibration cannot complete. */
+        dqs_dly = 0x0a;
+        sck_dly = 0x0a;
+    }
     //dqs_dly = 0xa;
     //sck_dly = 0xa;
 #else
@@ -1163,6 +1173,7 @@ static void HAL_Delay_us_psram(__IO uint32_t us)
 static int HAL_MPI_OPSRAM_CAL_DELAY(FLASH_HandleTypeDef *hflash, uint8_t *sck, uint8_t *dqs)
 {
     uint32_t delay;
+    uint32_t timeout;
 
     if (hflash == NULL)
         return HAL_ERROR;
@@ -1174,7 +1185,19 @@ static int HAL_MPI_OPSRAM_CAL_DELAY(FLASH_HandleTypeDef *hflash, uint8_t *sck, u
     //HAL_Delay_us(20);  // add delay to avoid CDC during cal_done polling
     HAL_Delay_us_psram(0);
     HAL_Delay_us_psram(20);
-    while (!(hflash->Instance->CALCR & MPI_CALCR_DONE_Msk));
+    timeout = 1000000;
+    while (!(hflash->Instance->CALCR & MPI_CALCR_DONE_Msk) && timeout > 0)
+    {
+        timeout--;
+    }
+
+    if (timeout == 0)
+    {
+        hflash->Instance->CALCR &= ~MPI_CALCR_EN;
+        hflash->Instance->PSCLR = 1;
+        return HAL_TIMEOUT;
+    }
+
     delay = hflash->Instance->CALCR & MPI_CALCR_DELAY_Msk;
     hflash->Instance->CALCR &= ~MPI_CALCR_EN;
 
