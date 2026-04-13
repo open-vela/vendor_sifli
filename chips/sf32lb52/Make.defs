@@ -34,6 +34,7 @@ include armv7-m/Make.defs
 
 CHIP_CSRCS += sifli_start.c sifli_irq.c sifli_uart.c
 CHIP_CSRCS += sifli_oneshot.c sifli_allocateheap.c
+CHIP_CSRCS += sifli_spi.c
 
 ifeq ($(CONFIG_ADC),y)
 CHIP_CSRCS += sf32lb_adc.c
