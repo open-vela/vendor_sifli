@@ -25,6 +25,7 @@
 // eg: arm_internal.h riscv_internal.h
 #include <nuttx/config.h>
 
+#include <syslog.h>
 #include <errno.h>
 #include <debug.h>
 
@@ -33,22 +34,49 @@
 #endif
 
 #include "arm_internal.h"
+#include "sf32lb52_devkit_lcd.h"
+#include "bf0_hal.h"
+#include "drv_io.h"
+
+#include <nuttx/board.h>
+#include <nuttx/lcd/lcd.h>
+#include <nuttx/lcd/lcd_dev.h>
+#include <nuttx/video/fb.h>
 
 #ifdef CONFIG_ADC
 extern int sf32lb_adc_init(const char *devpath);
-#endif
-
-#ifdef CONFIG_WATCHDOG
-extern void sf32lb_iwdginitialize(const char *devpath);
 #endif
 
 #if defined(CONFIG_RTC) && defined(CONFIG_RTC_DRIVER)
 #  include "sf32lb_rtc.h"
 #endif
 
+#ifdef CONFIG_WATCHDOG
+extern void sf32lb_iwdginitialize(const char *devpath);
+#endif
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
+
+#ifdef CONFIG_LCD
+#define LCD_INIT_TASK_STACKSIZE 4096
+#define LCD_INIT_TASK_PRIORITY (SCHED_PRIORITY_DEFAULT - 5)
+
+static int lcd_async_init_thread(int argc, FAR char *argv[])
+{
+  int ret;
+
+  ret = board_lcd_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: board_lcd_initialize failed: %d\n", ret);
+      return ret;
+    }
+
+  return OK;
+}
+#endif
 
 /****************************************************************************
  * Name: sf32lb52_devkit_lcd_bringup
@@ -91,6 +119,44 @@ int sf32lb52_devkit_lcd_bringup(void)
   if (ret < 0)
     {
       serr("ERROR: sf32lb_adc_init failed: %d\n", ret);
+      return ret;
+    }
+#endif
+
+#ifdef CONFIG_DEV_GPIO
+  ret = sifli_gpio_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: sifli_gpio_initialize failed: %d\n", ret);
+      return ret;
+    }
+#endif
+
+#ifdef CONFIG_I2C
+  /* Initialize I2C bus 0 */
+      HAL_PIN_Set(PAD_PA20, I2C1_SCL, PIN_PULLUP, 1);
+    HAL_PIN_Set(PAD_PA27, I2C1_SDA, PIN_PULLUP, 1);
+    struct i2c_master_s *i2c0 = NULL;
+    i2c0 = sifli_i2cbus_initialize(0);
+    if (i2c0)
+    {
+        ret = i2c_register(i2c0, 0);
+    }
+
+#endif  
+
+#ifdef CONFIG_LCD
+  int pid;
+
+  pid = task_create("lcd_async_init",
+                    LCD_INIT_TASK_PRIORITY,
+                    LCD_INIT_TASK_STACKSIZE,
+                    lcd_async_init_thread,
+                    NULL);
+  if (pid < 0)
+    {
+      ret = -errno;
+      syslog(LOG_ERR, "ERROR: lcd_async_init task_create failed: %d\n", ret);
       return ret;
     }
 #endif

@@ -37,6 +37,7 @@
 #include "systick.h"
 #include "chip.h"
 #include "bf0_hal.h"
+#include "system_bf0_ap.h"
 #include "tim_config.h"
 #include "bf0_hal_lptim.h"
 
