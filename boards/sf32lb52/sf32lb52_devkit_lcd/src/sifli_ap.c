@@ -37,6 +37,7 @@
 #include "sf32lb52_devkit_lcd.h"
 #include "bf0_hal.h"
 #include "drv_io.h"
+#include "sifli_gpio.h"
 
 #include <nuttx/board.h>
 #include <nuttx/lcd/lcd.h>
@@ -53,6 +54,10 @@ extern int sf32lb_adc_init(const char *devpath);
 
 #ifdef CONFIG_WATCHDOG
 extern void sf32lb_iwdginitialize(const char *devpath);
+#endif
+
+#ifdef CONFIG_INPUT_FT6146
+int ft6146_touch_initialize(struct i2c_master_s *i2c, uint32_t irq_pin);
 #endif
 
 /****************************************************************************
@@ -133,15 +138,34 @@ int sf32lb52_devkit_lcd_bringup(void)
 #endif
 
 #ifdef CONFIG_I2C
-  /* Initialize I2C bus 0 */
-      HAL_PIN_Set(PAD_PA20, I2C1_SCL, PIN_PULLUP, 1);
-    HAL_PIN_Set(PAD_PA27, I2C1_SDA, PIN_PULLUP, 1);
-    struct i2c_master_s *i2c0 = NULL;
-    i2c0 = sifli_i2cbus_initialize(0);
-    if (i2c0)
+  /* Initialize I2C bus 0 on the touch panel pins. */
+  struct i2c_master_s *i2c0 = NULL;
+
+  HAL_PIN_Set(PAD_PA30, I2C1_SCL, PIN_PULLUP, 1);
+  HAL_PIN_Set(PAD_PA33, I2C1_SDA, PIN_PULLUP, 1);
+
+  i2c0 = sifli_i2cbus_initialize(0);
+  if (i2c0 == NULL)
     {
-        ret = i2c_register(i2c0, 0);
+      syslog(LOG_ERR, "ERROR: sifli_i2cbus_initialize(0) failed\n");
+      return -ENODEV;
     }
+
+  ret = i2c_register(i2c0, 0);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: i2c_register(/dev/i2c0) failed: %d\n", ret);
+      return ret;
+    }
+
+#ifdef CONFIG_INPUT_FT6146
+  ret = ft6146_touch_initialize(i2c0, GET_PIN_2(hwp_gpio1, CONFIG_TOUCH_IRQ_PIN));
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: ft6146_touch_initialize failed: %d\n", ret);
+      return ret;
+    }
+#endif
 
 #endif  
 
