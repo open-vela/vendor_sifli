@@ -18,7 +18,7 @@
 #
 # ##############################################################################
 
-set(SRCS sifli_ap.c sifli_gpio.c)
+set(SRCS sifli_ap.c sifli_gpio.c bsp_init.c bsp_lcd_tp.c bsp_pinmux.c bsp_power.c )
 
 nuttx_add_romfs(
   NAME

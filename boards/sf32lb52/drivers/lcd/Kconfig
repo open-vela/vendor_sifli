@@ -1,0 +1,103 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+menuconfig SIFLI_LCD
+    bool "SiFli Display Driver"
+    default n
+
+if SIFLI_LCD
+    config LCD_USING_ILI8688E
+        bool
+        default n
+
+    config BSP_LCDC_USING_SPI_NODCX_1DATA
+        def_bool n 
+    config BSP_LCDC_USING_SPI_NODCX_2DATA
+        def_bool n 
+    config BSP_LCDC_USING_SPI_DCX_1DATA
+        def_bool n 
+    config BSP_LCDC_USING_SPI_DCX_2DATA
+        def_bool n 
+    config BSP_LCDC_USING_QADSPI
+        def_bool n 
+    config BSP_LCDC_USING_DBI
+        def_bool n 
+    config BSP_LCDC_USING_DSI
+        def_bool n
+    config BSP_LCDC_USING_DPI
+        def_bool n
+    config BSP_USING_RAMLESS_LCD
+        def_bool n
+    config BSP_LCDC_USING_JDI_PARALLEL
+        def_bool n
+
+    config LCD_USING_PWM_AS_BACKLIGHT
+        def_bool n
+
+    config BSP_LCDC1_USE_LCDC2_TE
+        def_bool n
+
+    config BSP_USE_LCDC2_ON_HPSYS
+        def_bool n
+
+    config BSP_USING_ROUND_TYPE_LCD
+        def_bool n
+
+    config BSP_USING_RECT_TYPE_LCD
+        def_bool n
+
+
+
+    choice
+        prompt "Select LCD"
+        default LCD_USING_ED_LB55BILI8688E
+
+        config LCD_USING_ED_LB55BILI8688E
+            bool "1.78 rect QAD-SPI LCD(ED-LB55DSI17801 - Green)"
+            select LCD_USING_ILI8688E
+            select TSC_USING_CST918 if BSP_USING_TOUCHD
+            select BSP_LCDC_USING_QADSPI
+            select BSP_USING_RECT_TYPE_LCD
+            if LCD_USING_ED_LB55BILI8688E
+               config LCD_ILI8688E_VSYNC_ENABLE
+                    bool "Enable LCD VSYNC (TE signal)"
+                    def_bool y
+            endif
+
+        config LCD_USING_CO5300
+            bool "1.85 rect QSPI Single-Screen LCD(LCD_1P85_390*450_DevKit_Adapter_V1.0.0)"
+            select BSP_LCDC_USING_QADSPI
+            select LCD_USING_PWM_AS_BACKLIGHT
+            select BSP_USING_RECT_TYPE_LCD
+            if LCD_USING_CO5300
+               config LCD_CO5300_VSYNC_ENABLE
+                    bool "Enable LCD VSYNC (TE signal)"
+                    def_bool y
+
+                   config LCD_CO5300_BW_TEST_MODE
+                    bool "Enable CO5300 Black/White Test On Boot"
+                    default n
+            endif
+
+    endchoice
+
+    config LCD_HOR_RES_MAX
+        int
+        default 368 if LCD_USING_ED_LB55BILI8688E
+        default 390 if LCD_USING_CO5300
+
+        
+    config LCD_VER_RES_MAX
+        int
+        default 448 if LCD_USING_ED_LB55BILI8688E
+        default 450 if LCD_USING_CO5300
+
+
+    config LCD_DPI
+        int
+        default 315 if LCD_USING_ED_LB55BILI8688E
+        default 315 if LCD_USING_CO5300
+
+endif
