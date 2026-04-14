@@ -18,6 +18,7 @@
 #
 ############################################################################
 include platform/lcd/Make.defs
+include platform/input/Make.defs
 
 DEPPATH += --dep-path platform$(DELIM)include$(DELIM)
 VPATH += :platform$(DELIM)include$(DELIM)
