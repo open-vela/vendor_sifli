@@ -47,3 +47,7 @@ endif
 ifeq ($(CONFIG_WATCHDOG),y)
 CHIP_CSRCS += sf32lb_iwdg.c
 endif
+
+ifeq ($(CONFIG_MTD),y)
+CHIP_CSRCS += sf32lb_flash.c
+endif

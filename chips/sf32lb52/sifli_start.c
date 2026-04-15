@@ -49,6 +49,10 @@
 
 #define HEAP_BASE      ((uintptr_t)_ebss + CONFIG_IDLETHREAD_STACKSIZE)
 
+extern uint32_t _siramfunc;
+extern uint32_t _sramfunc;
+extern uint32_t _eramfunc;
+
 void arm_lowputs(const char *str)
 {
   while (*str)
@@ -178,6 +182,14 @@ void __start(void)
 
   for (src = (const uint32_t *)_eronly,
        dest = (uint32_t *)_sdata; dest < (uint32_t *)_edata; )
+    {
+      *dest++ = *src++;
+    }
+
+  /* Copy .ramfunc section from flash to SRAM */
+
+  for (src = (const uint32_t *)&_siramfunc,
+       dest = (uint32_t *)&_sramfunc; dest < (uint32_t *)&_eramfunc; )
     {
       *dest++ = *src++;
     }

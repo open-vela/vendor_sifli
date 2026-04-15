@@ -27,6 +27,8 @@
 
 #include <syslog.h>
 #include <errno.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
 #include <debug.h>
 
 #if defined(CONFIG_RTC) && defined(CONFIG_RTC_DRIVER)
@@ -48,6 +50,15 @@
 extern int sf32lb_adc_init(const char *devpath);
 #endif
 
+#ifdef CONFIG_MTD
+extern int sf32lb_nor_automount(int minor, int block_offset, int block_count);
+#endif
+
+/* Follow SiFli SDK partition table:
+ * FS_REGION offset=0x008A0000 size=0x00400000 on flash2.
+ */
+#define SF32LB52_NOR_FS_OFFSET_BLOCKS (0x008A0000 / 4096)
+#define SF32LB52_NOR_FS_SIZE_BLOCKS   (0x00400000 / 4096)
 #if defined(CONFIG_RTC) && defined(CONFIG_RTC_DRIVER)
 #  include "sf32lb_rtc.h"
 #endif
@@ -100,6 +111,27 @@ static int lcd_async_init_thread(int argc, FAR char *argv[])
 int sf32lb52_devkit_lcd_bringup(void)
 {
   int ret = OK;
+  int tmpret;
+
+#ifdef CONFIG_FS_PROCFS
+  tmpret = mkdir("/proc", 0755);
+  if (tmpret < 0 && errno != EEXIST)
+    {
+      serr("WARN: mkdir /proc failed: %d\n", errno);
+    }
+
+  tmpret = nx_mount(NULL, "/proc", "procfs", 0, NULL);
+  if (tmpret < 0 && tmpret != -EBUSY)
+    {
+      serr("WARN: mount procfs failed: %d\n", tmpret);
+    }
+#endif
+
+  tmpret = mkdir("/data", 0755);
+  if (tmpret < 0 && errno != EEXIST)
+    {
+      serr("WARN: mkdir /data failed: %d\n", errno);
+    }
 
 #if defined(CONFIG_RTC) && defined(CONFIG_RTC_DRIVER)
   struct rtc_lowerhalf_s *rtclower = NULL;
@@ -187,6 +219,16 @@ int sf32lb52_devkit_lcd_bringup(void)
 
 #ifdef CONFIG_WATCHDOG
   sf32lb_iwdginitialize("/dev/watchdog0");
+#endif
+
+#ifdef CONFIG_MTD
+  ret = sf32lb_nor_automount(0,
+                             SF32LB52_NOR_FS_OFFSET_BLOCKS,
+                             SF32LB52_NOR_FS_SIZE_BLOCKS);
+  if (ret < 0)
+    {
+      serr("WARN: sf32lb_nor_automount failed: %d\n", ret);
+    }
 #endif
 
   return ret;

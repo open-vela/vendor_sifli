@@ -22,6 +22,11 @@
 
 #include "flash_table.h"
 
+#if defined(SF32LB52X)
+#  undef __HAL_ROM_USED
+#  define __HAL_ROM_USED HAL_SECTION(".ramfunc")
+#endif
+
 #define DBG_FOR_FLASH_ID        (0)
 #if DBG_FOR_FLASH_ID
 #define DEBUG_UART_EN       0

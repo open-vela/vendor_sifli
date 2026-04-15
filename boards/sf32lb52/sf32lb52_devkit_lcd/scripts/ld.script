@@ -200,6 +200,16 @@ SECTIONS
         _edata = ABSOLUTE(.);
     } > sram AT > flash
 
+    .ramfunc : {
+        . = ALIGN(4);
+        _sramfunc = ABSOLUTE(.);
+        *(.ramfunc .ramfunc.*)
+        . = ALIGN(4);
+        _eramfunc = ABSOLUTE(.);
+    } > sram AT > flash
+
+    _siramfunc = LOADADDR(.ramfunc);
+
     .bss : {
         . = ALIGN(4);
         _sbss = ABSOLUTE(.);
