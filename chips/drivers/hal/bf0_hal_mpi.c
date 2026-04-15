@@ -22,6 +22,11 @@
 
 #include "flash_table.h"
 
+#if defined(SF32LB52X)
+#  undef __HAL_ROM_USED
+#  define __HAL_ROM_USED HAL_SECTION(".ramfunc")
+#endif
+
 __HAL_ROM_USED HAL_StatusTypeDef HAL_QSPI_Init(FLASH_HandleTypeDef *hflash, qspi_configure_t *cfg)
 {
     if (hflash == NULL || cfg == NULL)
