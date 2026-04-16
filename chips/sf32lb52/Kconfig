@@ -15,6 +15,7 @@ config ARCH_CHIP_SF32LB52
 	bool "sf32lb52"
  	select ARCH_ARMV8M
 	select ARCH_CORTEXM33
+    select ARCH_HAVE_FPU
 	select ARCH_HAVE_MPU
 	select ARCH_HAVE_FETCHADD
 	select ARCH_HAVE_HEAPCHECK

@@ -34,6 +34,7 @@
 
 extern void BSP_PIN_Init(void);
 extern void BSP_Power_Up(bool is_deep_sleep);
+extern void BSP_Board_PreInit(void);
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -110,6 +111,8 @@ void HAL_MspInit(void)
 
 void HAL_PreInit(void)
 {
+  BSP_Board_PreInit();
+
 #ifdef CONFIG_BSP_USING_PSRAM
   HAL_MspInit();
   sifli_psram_preinit();
