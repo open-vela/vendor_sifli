@@ -53,6 +53,11 @@
 #  endif
 #endif
 
+#if defined(CONFIG_SPI) && defined(CONFIG_MMCSD_SPI) && \
+  defined(CONFIG_BSP_USING_SPI1)
+#  include <nuttx/mmcsd.h>
+#endif
+
 #ifdef CONFIG_ADC
 extern int sf32lb_adc_init(const char *devpath);
 #endif
@@ -70,6 +75,15 @@ extern int sf32lb_nor_automount(int minor, int block_offset, int block_count);
 #if defined(CONFIG_SPI) && defined(CONFIG_BSP_USING_SPI1)
 #  define SF32LB52_SPI1_PORT           0
 #endif
+
+#if defined(CONFIG_SPI) && defined(CONFIG_MMCSD_SPI) && \
+  defined(CONFIG_BSP_USING_SPI1)
+#  define SF32LB52_TFCARD_SPI_PORT     0
+#  define SF32LB52_TFCARD_SLOT         0
+#  define SF32LB52_TFCARD_MINOR        0
+#  define SF32LB52_TFCARD_MOUNTPOINT   "/data/tf"
+#endif
+
 #if defined(CONFIG_RTC) && defined(CONFIG_RTC_DRIVER)
 #  include "sf32lb_rtc.h"
 #endif
@@ -114,6 +128,75 @@ static int sf32lb52_spi1_register_char(void)
     }
 
   return OK;
+}
+#endif
+
+#if defined(CONFIG_MMCSD_SPI)
+static int sf32lb52_tfcard_mount(void)
+{
+#ifndef CONFIG_DISABLE_MOUNTPOINT
+  static const char *const devpaths[] =
+  {
+    "/dev/mmcsd0p0",
+    "/dev/mmcsd0"
+  };
+  int tmpret;
+  int ret = -ENODEV;
+  size_t i;
+
+  tmpret = mkdir(SF32LB52_TFCARD_MOUNTPOINT, 0755);
+  if (tmpret < 0 && errno != EEXIST)
+    {
+      serr("WARN: mkdir %s failed: %d\n", SF32LB52_TFCARD_MOUNTPOINT, errno);
+      return -errno;
+    }
+
+  for (i = 0; i < sizeof(devpaths) / sizeof(devpaths[0]); i++)
+    {
+      ret = nx_mount(devpaths[i], SF32LB52_TFCARD_MOUNTPOINT, "vfat", 0, NULL);
+      if (ret >= 0 || ret == -EBUSY)
+        {
+          syslog(LOG_INFO, "INFO: TF mounted from %s to %s\n",
+                 devpaths[i], SF32LB52_TFCARD_MOUNTPOINT);
+          return OK;
+        }
+    }
+
+  return ret;
+#else
+  return -ENOSYS;
+#endif
+}
+
+static int sf32lb52_tfcard_initialize(void)
+{
+  FAR struct spi_dev_s *spi;
+  int ret;
+
+  spi = sf32lb52_spi1_getbus();
+  if (spi == NULL)
+    {
+      serr("ERROR: sifli_spibus_initialize(%d) failed\n",
+           SF32LB52_TFCARD_SPI_PORT);
+      return -ENODEV;
+    }
+
+  ret = mmcsd_spislotinitialize(SF32LB52_TFCARD_MINOR,
+                                SF32LB52_TFCARD_SLOT,
+                                spi);
+  if (ret < 0)
+    {
+      serr("ERROR: mmcsd_spislotinitialize failed: %d\n", ret);
+      return ret;
+    }
+
+  ret = sf32lb52_tfcard_mount();
+  if (ret < 0)
+    {
+      serr("WARN: TF mount failed: %d\n", ret);
+    }
+
+  return ret;
 }
 #endif
 #endif
@@ -241,8 +324,9 @@ int sf32lb52_devkit_lcd_bringup(void)
   ret = ft6146_touch_initialize(i2c0, GET_PIN_2(hwp_gpio1, CONFIG_TOUCH_IRQ_PIN));
   if (ret < 0)
     {
-      syslog(LOG_ERR, "ERROR: ft6146_touch_initialize failed: %d\n", ret);
-      return ret;
+      syslog(LOG_ERR,
+             "ERROR: ft6146_touch_initialize failed: %d, continue bringup\n",
+             ret);
     }
 #endif
 
@@ -254,6 +338,15 @@ int sf32lb52_devkit_lcd_bringup(void)
   if (tmpret < 0)
     {
       serr("WARN: SPI1 char device register failed: %d\n", tmpret);
+    }
+#endif
+
+#if defined(CONFIG_SPI) && defined(CONFIG_MMCSD_SPI) && \
+    defined(CONFIG_BSP_USING_SPI1)
+  tmpret = sf32lb52_tfcard_initialize();
+  if (tmpret < 0)
+    {
+      serr("WARN: TF card init failed: %d\n", tmpret);
     }
 #endif
 
