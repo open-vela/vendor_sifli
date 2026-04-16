@@ -25,5 +25,15 @@
  * Pre-processor Definitions
  ****************************************************************************/
 
+/* Buttons
+ *
+ * This board exposes one user key on PA11 (Key2).
+ */
+
+#define BUTTON_KEY2      0
+#define NUM_BUTTONS      1
+
+#define BUTTON_KEY2_BIT  (1 << BUTTON_KEY2)
+
 #endif /* __VENDOR_SIFLI_BOARDS_SF32LB52_DEVKIT_LCD_INCLUDE_BOARD_H */
 

@@ -21,6 +21,11 @@
 include $(TOPDIR)/Make.defs
 
 CSRCS = sifli_ap.c
+
+ifeq ($(CONFIG_ARCH_BUTTONS),y)
+CSRCS += sf32lb52_buttons.c
+endif
+
 RCSRCS = etc/init.d/rc.sysinit etc/init.d/rcS
 RCRAWS = etc/group
 

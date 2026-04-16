@@ -170,7 +170,7 @@ static void BSP_PIN_Common(void)
      */
     // HAL_PIN_Set(PAD_PA34, GPIO_A34, PIN_NOPULL, 1);
     // Key2
-    HAL_PIN_Set(PAD_PA11, GPIO_A11, PIN_NOPULL, 1);
+    HAL_PIN_Set(PAD_PA11, GPIO_A11, PIN_PULLDOWN, 1);
 
     // PA22 #XTAL32K_XI
     // PA23 #XTAL32K_XO

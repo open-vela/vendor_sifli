@@ -299,6 +299,16 @@ int sf32lb52_devkit_lcd_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_INPUT_BUTTONS
+  ret = sf32lb52_button_initialize("/dev/buttons");
+  if (ret < 0 && ret != -EEXIST)
+    {
+      syslog(LOG_ERR, "ERROR: sf32lb52_button_initialize() failed: %d\n",
+             ret);
+      return ret;
+    }
+#endif
+
 #ifdef CONFIG_I2C
   /* Initialize I2C bus 0 on the touch panel pins. */
   struct i2c_master_s *i2c0 = NULL;
