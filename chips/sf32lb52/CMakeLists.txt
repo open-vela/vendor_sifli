@@ -38,6 +38,10 @@ if(CONFIG_MTD)
     list(APPEND SRCS sf32lb_flash.c)
 endif()
 
+if(CONFIG_TIMER)
+    list(APPEND SRCS sf32lb_timer.c)
+endif()
+
 # Add all HAL source files
 file(GLOB HAL_SRCS ${NUTTX_CHIP_ABS_DIR}/../drivers/hal/*.c)
 

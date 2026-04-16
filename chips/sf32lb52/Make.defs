@@ -51,3 +51,7 @@ endif
 ifeq ($(CONFIG_MTD),y)
 CHIP_CSRCS += sf32lb_flash.c
 endif
+
+ifeq ($(CONFIG_TIMER),y)
+CHIP_CSRCS += sf32lb_timer.c
+endif
