@@ -99,7 +99,7 @@ static void board_init_psram(void)
 }
 #endif
 
-void HAL_PreInit(void)
+void BSP_Board_PreInit(void)
 {
 #ifdef SOC_BF0_HCPU
 
@@ -131,10 +131,11 @@ void HAL_PreInit(void)
 
 #ifndef LXT_DISABLE
         HAL_PMU_EnableXTAL32();
-        if (HAL_PMU_LXTReady() != HAL_OK)
-            HAL_ASSERT(0);
-        // RTC/GTIME/LPTIME Using same low power clock source
-        HAL_RTC_ENABLE_LXT();
+        if (HAL_PMU_LXTReady() == HAL_OK)
+        {
+            // RTC/GTIME/LPTIME Using same low power clock source
+            HAL_RTC_ENABLE_LXT();
+        }
 #endif
 
 #ifndef CFG_BOOTLOADER
@@ -170,6 +171,9 @@ void HAL_PreInit(void)
     // Reset sysclk used by HAL_Delay_us
     HAL_Delay_us(0);
     //HAL_sw_breakpoint();
+
+    /* In NuttX flow, chip layer will handle pin/PSRAM/flash early init. */
+    return;
 
     mpi1_div = 2;   // for OPI Psram driver alway set 1, for QSPI PSRAM depend on this setting, for flash depend on flash request, 2 or 3
     mpi2_div = 4;
