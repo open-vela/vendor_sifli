@@ -45,6 +45,13 @@
 #include <nuttx/lcd/lcd.h>
 #include <nuttx/lcd/lcd_dev.h>
 #include <nuttx/video/fb.h>
+#if defined(CONFIG_SPI) && defined(CONFIG_BSP_USING_SPI1)
+#  include <nuttx/spi/spi.h>
+#  include "sf32lb_spi.h"
+#  ifdef CONFIG_SPI_DRIVER
+#    include <nuttx/spi/spi_transfer.h>
+#  endif
+#endif
 
 #ifdef CONFIG_ADC
 extern int sf32lb_adc_init(const char *devpath);
@@ -59,6 +66,10 @@ extern int sf32lb_nor_automount(int minor, int block_offset, int block_count);
  */
 #define SF32LB52_NOR_FS_OFFSET_BLOCKS (0x008A0000 / 4096)
 #define SF32LB52_NOR_FS_SIZE_BLOCKS   (0x00400000 / 4096)
+
+#if defined(CONFIG_SPI) && defined(CONFIG_BSP_USING_SPI1)
+#  define SF32LB52_SPI1_PORT           0
+#endif
 #if defined(CONFIG_RTC) && defined(CONFIG_RTC_DRIVER)
 #  include "sf32lb_rtc.h"
 #endif
@@ -69,6 +80,42 @@ extern void sf32lb_iwdginitialize(const char *devpath);
 
 #ifdef CONFIG_INPUT_FT6146
 int ft6146_touch_initialize(struct i2c_master_s *i2c, uint32_t irq_pin);
+#endif
+
+#if defined(CONFIG_SPI) && defined(CONFIG_BSP_USING_SPI1)
+static struct spi_dev_s *g_sf32lb52_spi1;
+
+static FAR struct spi_dev_s *sf32lb52_spi1_getbus(void)
+{
+  if (g_sf32lb52_spi1 == NULL)
+    {
+      g_sf32lb52_spi1 = sifli_spibus_initialize(SF32LB52_SPI1_PORT);
+    }
+
+  return g_sf32lb52_spi1;
+}
+
+#ifdef CONFIG_SPI_DRIVER
+static int sf32lb52_spi1_register_char(void)
+{
+  FAR struct spi_dev_s *spi;
+  int ret;
+
+  spi = sf32lb52_spi1_getbus();
+  if (spi == NULL)
+    {
+      return -ENODEV;
+    }
+
+  ret = spi_register(spi, 1);
+  if (ret < 0 && ret != -EEXIST)
+    {
+      return ret;
+    }
+
+  return OK;
+}
+#endif
 #endif
 
 /****************************************************************************
@@ -200,6 +247,15 @@ int sf32lb52_devkit_lcd_bringup(void)
 #endif
 
 #endif  
+
+#if defined(CONFIG_SPI) && defined(CONFIG_BSP_USING_SPI1) && \
+    defined(CONFIG_SPI_DRIVER)
+  tmpret = sf32lb52_spi1_register_char();
+  if (tmpret < 0)
+    {
+      serr("WARN: SPI1 char device register failed: %d\n", tmpret);
+    }
+#endif
 
 #ifdef CONFIG_LCD
   int pid;
