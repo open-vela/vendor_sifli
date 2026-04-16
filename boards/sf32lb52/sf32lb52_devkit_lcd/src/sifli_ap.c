@@ -44,6 +44,7 @@
 #include <nuttx/board.h>
 #include <nuttx/lcd/lcd.h>
 #include <nuttx/lcd/lcd_dev.h>
+#include <nuttx/timers/timer.h>
 #include <nuttx/video/fb.h>
 #if defined(CONFIG_SPI) && defined(CONFIG_BSP_USING_SPI1)
 #  include <nuttx/spi/spi.h>
@@ -90,6 +91,10 @@ extern int sf32lb_nor_automount(int minor, int block_offset, int block_count);
 
 #ifdef CONFIG_WATCHDOG
 extern void sf32lb_iwdginitialize(const char *devpath);
+#endif
+
+#ifdef CONFIG_TIMER
+#  include "sf32lb_timer.h"
 #endif
 
 #ifdef CONFIG_INPUT_FT6146
@@ -297,6 +302,32 @@ int sf32lb52_devkit_lcd_bringup(void)
       syslog(LOG_ERR, "ERROR: sifli_gpio_initialize failed: %d\n", ret);
       return ret;
     }
+#endif
+
+#ifdef CONFIG_TIMER
+#if SF32LB_TIMER_DEFAULT_INDEX >= 0
+  {
+    FAR struct timer_lowerhalf_s *timer_lower;
+    FAR void *timer_upper;
+
+    timer_lower = sf32lb_timer_initialize(SF32LB_TIMER_DEFAULT_INDEX,
+                                          1000000);
+    if (timer_lower == NULL)
+      {
+        syslog(LOG_ERR, "ERROR: sf32lb_timer_initialize failed\n");
+        return -ENODEV;
+      }
+
+    timer_upper = timer_register("/dev/timer0", timer_lower);
+    if (timer_upper == NULL)
+      {
+        ret = -errno;
+        syslog(LOG_ERR, "ERROR: timer_register(/dev/timer0) failed: %d\n",
+               errno);
+        return ret;
+      }
+  }
+#endif
 #endif
 
 #ifdef CONFIG_INPUT_BUTTONS
