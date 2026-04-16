@@ -39,6 +39,10 @@
 
 int sf32lb52_devkit_lcd_bringup(void);
 
+#ifdef CONFIG_INPUT_BUTTONS
+int sf32lb52_button_initialize(const char *devname);
+#endif
+
 
 #ifdef CONFIG_DEV_GPIO
 int sifli_gpio_initialize(void);
