@@ -198,9 +198,9 @@ static void BSP_PIN_Common(void)
 //     HAL_PIN_Set_DS1(PAD_PA25, 1, 1);
 //     HAL_PIN_Set_DS1(PAD_PA28, 1, 1);
 //     HAL_PIN_Set_DS1(PAD_PA29, 1, 1);
-#if defined(BSP_USING_PWM3) || defined(BSP_USING_RGBLED_WITCH_PWM3)
-    HAL_PIN_Set(PAD_PA32, GPTIM2_CH1, PIN_PULLUP, 1);   // RGB LED
-#endif
+
+    HAL_PIN_Set(PAD_PA32, GPTIM2_CH1, PIN_PULLUP, 1);   //  LED
+
     // GPIOs
     HAL_PIN_Set(PAD_PA21, GPIO_A21, PIN_PULLDOWN, 1);
     HAL_PIN_Set(PAD_PA26, GPIO_A26, PIN_NOPULL, 1);
