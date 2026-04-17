@@ -44,6 +44,7 @@
 #include <nuttx/board.h>
 #include <nuttx/lcd/lcd.h>
 #include <nuttx/lcd/lcd_dev.h>
+#include <nuttx/timers/pwm.h>
 #include <nuttx/timers/timer.h>
 #include <nuttx/video/fb.h>
 #if defined(CONFIG_SPI) && defined(CONFIG_BSP_USING_SPI1)
@@ -95,6 +96,10 @@ extern void sf32lb_iwdginitialize(const char *devpath);
 
 #ifdef CONFIG_TIMER
 #  include "sf32lb_timer.h"
+#endif
+
+#ifdef CONFIG_PWM
+#  include "sf32lb_pwm.h"
 #endif
 
 #ifdef CONFIG_INPUT_FT6146
@@ -324,6 +329,28 @@ int sf32lb52_devkit_lcd_bringup(void)
         ret = -errno;
         syslog(LOG_ERR, "ERROR: timer_register(/dev/timer0) failed: %d\n",
                errno);
+        return ret;
+      }
+  }
+#endif
+#endif
+
+#ifdef CONFIG_PWM
+#if SF32LB_PWM_DEFAULT_INDEX >= 0
+  {
+    FAR struct pwm_lowerhalf_s *pwm_lower;
+
+    pwm_lower = sf32lb_pwm_initialize(SF32LB_PWM_DEFAULT_INDEX);
+    if (pwm_lower == NULL)
+      {
+        syslog(LOG_ERR, "ERROR: sf32lb_pwm_initialize failed\n");
+        return -ENODEV;
+      }
+
+    ret = pwm_register("/dev/pwm0", pwm_lower);
+    if (ret < 0 && ret != -EEXIST)
+      {
+        syslog(LOG_ERR, "ERROR: pwm_register(/dev/pwm0) failed: %d\n", ret);
         return ret;
       }
   }
