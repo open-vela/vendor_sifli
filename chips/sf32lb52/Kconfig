@@ -1565,6 +1565,13 @@ menu "On-chip Peripheral RTOS Drivers"
              HAL API is used instead of rt device driver, so module cannot be disabled
         default n
 
+    config SF32LB52_USBDEV
+        bool "Enable USB Device Controller"
+        default n
+        select USBDEV
+        ---help---
+            Enable the SF32LB52 on-chip MUSB USB device controller driver.
+
 endmenu
 
 endif

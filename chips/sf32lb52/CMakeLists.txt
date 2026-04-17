@@ -46,6 +46,10 @@ if(CONFIG_PWM)
     list(APPEND SRCS sf32lb_pwm.c)
 endif()
 
+if(CONFIG_SF32LB52_USBDEV)
+    list(APPEND SRCS sf32lb_usbdev.c)
+endif()
+
 # Add all HAL source files
 file(GLOB HAL_SRCS ${NUTTX_CHIP_ABS_DIR}/../drivers/hal/*.c)
 
