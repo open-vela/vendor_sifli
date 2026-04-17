@@ -64,6 +64,10 @@
 extern int sf32lb_adc_init(const char *devpath);
 #endif
 
+#ifdef CONFIG_CDCACM
+#  include <nuttx/usb/cdcacm.h>
+#endif
+
 #ifdef CONFIG_MTD
 extern int sf32lb_nor_automount(int minor, int block_offset, int block_count);
 #endif
@@ -445,6 +449,14 @@ int sf32lb52_devkit_lcd_bringup(void)
   if (ret < 0)
     {
       serr("WARN: sf32lb_nor_automount failed: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_CDCACM
+  ret = cdcacm_initialize(0, NULL);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: cdcacm_initialize failed: %d\n", ret);
     }
 #endif
 

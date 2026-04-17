@@ -59,3 +59,11 @@ endif
 ifeq ($(CONFIG_PWM),y)
 CHIP_CSRCS += sf32lb_pwm.c
 endif
+
+ifeq ($(CONFIG_SF32LB52_USBDEV),y)
+CHIP_CSRCS += sf32lb_usbdev.c
+endif
+
+ifeq ($(CONFIG_SF32LB52_USBDEV),y)
+CHIP_CSRCS += sf32lb_usbdev.c
+endif
