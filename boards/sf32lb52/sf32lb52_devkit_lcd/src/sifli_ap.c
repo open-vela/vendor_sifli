@@ -41,6 +41,7 @@
 #include "drv_io.h"
 #include "sifli_gpio.h"
 
+#include <nuttx/arch.h>
 #include <nuttx/board.h>
 #include <nuttx/lcd/lcd.h>
 #include <nuttx/lcd/lcd_dev.h>
@@ -276,6 +277,15 @@ int sf32lb52_devkit_lcd_bringup(void)
     {
       serr("WARN: mkdir /data failed: %d\n", errno);
     }
+
+#ifdef CONFIG_FS_TMPFS
+  /* Keep /data writable for syscall and file API test cases. */
+  tmpret = nx_mount(NULL, "/data", "tmpfs", 0, NULL);
+  if (tmpret < 0 && tmpret != -EBUSY)
+    {
+      serr("WARN: mount tmpfs on /data failed: %d\n", tmpret);
+    }
+#endif
 
 #if defined(CONFIG_RTC) && defined(CONFIG_RTC_DRIVER)
   struct rtc_lowerhalf_s *rtclower = NULL;
@@ -558,6 +568,16 @@ int board_app_initialize(uintptr_t arg)
   return sf32lb52_devkit_lcd_bringup();
 #endif
 }
+
+#ifdef CONFIG_BOARDCTL_RESET
+int board_reset(int status)
+{
+  (void)status;
+
+  up_systemreset();
+  return OK;
+}
+#endif
 
 /****************************************************************************
  * Name: board_app_finalinitialize

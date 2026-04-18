@@ -30,6 +30,7 @@ nuttx_add_romfs(
   etc/init.d/rc.sysinit
   RCRAWS
   etc/group
+  etc/1.txt
   PATH
   ${CMAKE_CURRENT_LIST_DIR}/etc)
 
@@ -52,3 +53,15 @@ target_include_directories(board PRIVATE ${NUTTX_CHIP_ABS_DIR}/../boards/include
 target_compile_options(board PRIVATE
     $<$<COMPILE_LANGUAGE:C>:-w>
     $<$<COMPILE_LANGUAGE:CXX>:-w>)
+
+if(CONFIG_CRYPTO)
+  nuttx_add_application(
+    NAME
+    md5_test
+    STACKSIZE
+    4096
+    PRIORITY
+    100
+    SRCS
+    md5_test.c)
+endif()
