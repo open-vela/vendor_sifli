@@ -64,6 +64,17 @@ ifeq ($(CONFIG_SF32LB52_USBDEV),y)
 CHIP_CSRCS += sf32lb_usbdev.c
 endif
 
+ifeq ($(CONFIG_UART_BTH4),y)
+CHIP_CSRCS += sf32lb52_bt_adapter.c
+CHIP_CSRCS += sf32lb52_bth4.c
+CHIP_CSRCS += sf32lb52_lcpu_boot.c
+CHIP_CSRCS += ../drivers/cmsis/sf32lb52x/lcpu_patch.c
+CHIP_CSRCS += ../drivers/cmsis/sf32lb52x/lcpu_patch_rev_b.c
+CHIP_CSRCS += ../drivers/cmsis/sf32lb52x/bt_rf_fulcal.c
+endif
+
+include ./ipc_queue/Make.defs
+
 ifeq ($(CONFIG_SF32LB52_USBDEV),y)
 CHIP_CSRCS += sf32lb_usbdev.c
 endif

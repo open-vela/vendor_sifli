@@ -99,6 +99,10 @@ extern int sf32lb_nor_automount(int minor, int block_offset, int block_count);
 extern void sf32lb_iwdginitialize(const char *devpath);
 #endif
 
+#ifdef CONFIG_UART_BTH4
+extern int sf32lb52_bt_initialize(void);
+#endif
+
 #ifdef CONFIG_TIMER
 #  include "sf32lb_timer.h"
 #endif
@@ -467,6 +471,14 @@ int sf32lb52_devkit_lcd_bringup(void)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: cdcacm_initialize failed: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_UART_BTH4
+  tmpret = sf32lb52_bt_initialize();
+  if (tmpret < 0 && tmpret != -EEXIST)
+    {
+      serr("WARN: sf32lb52_bt_initialize failed: %d\n", tmpret);
     }
 #endif
 
