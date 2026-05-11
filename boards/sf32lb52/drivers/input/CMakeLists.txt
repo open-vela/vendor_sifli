@@ -24,5 +24,5 @@ if(CONFIG_INPUT_FT6146)
   list(APPEND SRCS ft6146.c)
 endif()
 
-target_sources(board PRIVATE ${SRCS})
-target_include_directories(board PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_sources(drivers PRIVATE ${SRCS})
+target_include_directories(drivers PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

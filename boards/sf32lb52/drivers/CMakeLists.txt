@@ -18,4 +18,21 @@
 #
 # ##############################################################################
 
+target_compile_definitions(drivers PRIVATE SOC_BF0_HCPU
+										   SF32LB52X
+										   HAL_TICK_PER_SECOND=1000
+										   USE_HAL_DRIVER)
+
+target_include_directories(drivers PRIVATE ${NUTTX_CHIP_ABS_DIR}
+										   ${NUTTX_CHIP_ABS_DIR}/include
+										   ${NUTTX_CHIP_ABS_DIR}/../drivers/Include
+										   ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/Include
+										   ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/sf32lb52x
+										   ${NUTTX_CHIP_ABS_DIR}/../external/CMSIS/Include
+										   ${NUTTX_CHIP_ABS_DIR}/../boards/include/config/sf32lb52x
+										   ${NUTTX_BOARD_ABS_DIR}/include
+										   ${NUTTX_DIR}/arch/arm/src/common
+										   ${NUTTX_DIR}/arch/arm/src/armv8-m
+										   ${NUTTX_DIR}/arch/arm/src/arm_m)
+
 nuttx_add_subdirectory()

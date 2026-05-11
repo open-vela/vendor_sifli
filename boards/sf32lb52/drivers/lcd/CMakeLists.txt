@@ -32,8 +32,8 @@ if(CONFIG_LCD_USING_ILI8688E)
   list(APPEND SRCS ili8688e.c)
 endif()
 
-target_sources(board PRIVATE ${SRCS})
-target_include_directories(board PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_sources(drivers PRIVATE ${SRCS})
+target_include_directories(drivers PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Force linker to keep LCD driver descriptors from static library.
 # LCD_DRIVER_EXPORT places descriptors into the "LcdDriverDescTab" section
@@ -41,9 +41,9 @@ target_include_directories(board PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # linker will discard the unreferenced .o from the static archive.
 
 if(CONFIG_LCD_USING_CO5300)
-  target_link_options(board PRIVATE -u __lcddriver_co5300)
+  target_link_options(drivers PRIVATE -u __lcddriver_co5300)
 endif()
 
 if(CONFIG_LCD_USING_ILI8688E)
-  target_link_options(board PRIVATE -u __lcddriver_ili8688e)
+  target_link_options(drivers PRIVATE -u __lcddriver_ili8688e)
 endif()
