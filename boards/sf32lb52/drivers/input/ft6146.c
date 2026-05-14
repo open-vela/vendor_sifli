@@ -174,14 +174,6 @@ static int ft6146_hw_init(struct ft6146_touch_lowerhalf_s *ft6146)
       return ret;
     }
 
-  ret = sifli_gpio_set_event(ft6146->pin_irq, false, true,
-                             ft6146_irq_handler, ft6146);
-  if (ret < 0)
-    {
-      ierr("ft6146: irq event setup failed: %d\n", ret);
-      return ret;
-    }
-
   ret = ft6146_i2c_read(ft6146->i2c, FT6146_REG_ID_H, &id_h, 1);
   if (ret < 0)
     {
@@ -197,6 +189,15 @@ static int ft6146_hw_init(struct ft6146_touch_lowerhalf_s *ft6146)
     }
 
   iinfo("ft6146 id_h=0x%02x id_l=0x%02x\n", id_h, id_l);
+
+  ret = sifli_gpio_set_event(ft6146->pin_irq, false, true,
+                             ft6146_irq_handler, ft6146);
+  if (ret < 0)
+    {
+      ierr("ft6146: irq event setup failed: %d\n", ret);
+      return ret;
+    }
+
   return OK;
 }
 
@@ -260,6 +261,7 @@ int ft6146_touch_initialize(struct i2c_master_s *i2c, uint32_t irq_pin)
   ret = ft6146_hw_init(ft6146);
   if (ret < 0)
     {
+      touch_unregister(&ft6146->lower, "/dev/" FT6146_NAME_TOUCH);
       nxmutex_destroy(&ft6146->devlock);
       nxsem_destroy(&ft6146->waitsem);
       kmm_free(ft6146);
