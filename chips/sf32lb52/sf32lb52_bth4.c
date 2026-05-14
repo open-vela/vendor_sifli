@@ -42,12 +42,104 @@
 #  define BT_HCI_OP_READ_SUPPORTED_COMMANDS BT_OP(BT_OGF_INFO, 0x0002)
 #endif
 
+#ifndef BT_HCI_OP_READ_LOCAL_EXT_FEATURES
+#  define BT_HCI_OP_READ_LOCAL_EXT_FEATURES BT_OP(BT_OGF_INFO, 0x0004)
+#endif
+
+#ifndef BT_HCI_OP_READ_BUFFER_SIZE
+#  define BT_HCI_OP_READ_BUFFER_SIZE        BT_OP(BT_OGF_INFO, 0x0005)
+#endif
+
+#ifndef BT_HCI_OP_WRITE_DEFAULT_LINK_POLICY_SETTINGS
+#  define BT_HCI_OP_WRITE_DEFAULT_LINK_POLICY_SETTINGS BT_OP(BT_OGF_LINK_POLICY, 0x000f)
+#endif
+
+#ifndef BT_HCI_OP_SET_EVENT_MASK
+#  define BT_HCI_OP_SET_EVENT_MASK          BT_OP(BT_OGF_BASEBAND, 0x0001)
+#endif
+
+#ifndef BT_HCI_OP_WRITE_LOCAL_NAME
+#  define BT_HCI_OP_WRITE_LOCAL_NAME        BT_OP(BT_OGF_BASEBAND, 0x0013)
+#endif
+
+#ifndef BT_HCI_OP_WRITE_PAGE_TIMEOUT
+#  define BT_HCI_OP_WRITE_PAGE_TIMEOUT      BT_OP(BT_OGF_BASEBAND, 0x0018)
+#endif
+
+#ifndef BT_HCI_OP_WRITE_SCAN_ENABLE
+#  define BT_HCI_OP_WRITE_SCAN_ENABLE       BT_OP(BT_OGF_BASEBAND, 0x001a)
+#endif
+
+#ifndef BT_HCI_OP_WRITE_PAGE_SCAN_ACTIVITY
+#  define BT_HCI_OP_WRITE_PAGE_SCAN_ACTIVITY BT_OP(BT_OGF_BASEBAND, 0x001c)
+#endif
+
+#ifndef BT_HCI_OP_WRITE_INQUIRY_SCAN_ACTIVITY
+#  define BT_HCI_OP_WRITE_INQUIRY_SCAN_ACTIVITY BT_OP(BT_OGF_BASEBAND, 0x001e)
+#endif
+
+#ifndef BT_HCI_OP_WRITE_CLASS_OF_DEVICE
+#  define BT_HCI_OP_WRITE_CLASS_OF_DEVICE   BT_OP(BT_OGF_BASEBAND, 0x0024)
+#endif
+
+#ifndef BT_HCI_OP_WRITE_INQUIRY_SCAN_TYPE
+#  define BT_HCI_OP_WRITE_INQUIRY_SCAN_TYPE BT_OP(BT_OGF_BASEBAND, 0x0043)
+#endif
+
+#ifndef BT_HCI_OP_WRITE_EXTENDED_INQUIRY_RESPONSE
+#  define BT_HCI_OP_WRITE_EXTENDED_INQUIRY_RESPONSE BT_OP(BT_OGF_BASEBAND, 0x0052)
+#endif
+
+#ifndef BT_HCI_OP_WRITE_INQUIRY_MODE
+#  define BT_HCI_OP_WRITE_INQUIRY_MODE      BT_OP(BT_OGF_BASEBAND, 0x0045)
+#endif
+
+#ifndef BT_HCI_OP_WRITE_PAGE_SCAN_TYPE
+#  define BT_HCI_OP_WRITE_PAGE_SCAN_TYPE    BT_OP(BT_OGF_BASEBAND, 0x0047)
+#endif
+
+#ifndef BT_HCI_OP_WRITE_SSP_MODE
+#  define BT_HCI_OP_WRITE_SSP_MODE          BT_OP(BT_OGF_BASEBAND, 0x0056)
+#endif
+
+#ifndef BT_HCI_OP_SET_EVENT_MASK_PAGE_2
+#  define BT_HCI_OP_SET_EVENT_MASK_PAGE_2   BT_OP(BT_OGF_BASEBAND, 0x0063)
+#endif
+
+#ifndef BT_HCI_OP_WRITE_SC_HOST_SUPP
+#  define BT_HCI_OP_WRITE_SC_HOST_SUPP      BT_OP(BT_OGF_BASEBAND, 0x007a)
+#endif
+
+#ifndef BT_HCI_OP_LE_SET_EVENT_MASK
+#  define BT_HCI_OP_LE_SET_EVENT_MASK       BT_OP(BT_OGF_LE, 0x0001)
+#endif
+
 #ifndef BT_HCI_OP_LE_READ_SUPP_STATES
 #  define BT_HCI_OP_LE_READ_SUPP_STATES     BT_OP(BT_OGF_LE, 0x001c)
 #endif
 
+#ifndef BT_HCI_OP_LE_READ_LOCAL_FEATURES
+#  define BT_HCI_OP_LE_READ_LOCAL_FEATURES  BT_OP(BT_OGF_LE, 0x0003)
+#endif
+
+#ifndef BT_HCI_OP_LE_WRITE_DEFAULT_DATA_LEN
+#  define BT_HCI_OP_LE_WRITE_DEFAULT_DATA_LEN BT_OP(BT_OGF_LE, 0x0024)
+#endif
+
+#ifndef BT_HCI_OP_LE_READ_RL_SIZE
+#  define BT_HCI_OP_LE_READ_RL_SIZE         BT_OP(BT_OGF_LE, 0x002a)
+#endif
+
+#ifndef BT_HCI_OP_LE_SET_RPA_TIMEOUT
+#  define BT_HCI_OP_LE_SET_RPA_TIMEOUT      BT_OP(BT_OGF_LE, 0x002e)
+#endif
+
 #ifndef BT_HCI_OP_LE_READ_MAX_DATA_LEN
 #  define BT_HCI_OP_LE_READ_MAX_DATA_LEN    BT_OP(BT_OGF_LE, 0x002f)
+#endif
+
+#ifndef BT_HCI_OP_LE_READ_MAX_ADV_DATA_LEN
+#  define BT_HCI_OP_LE_READ_MAX_ADV_DATA_LEN BT_OP(BT_OGF_LE, 0x003a)
 #endif
 
 #ifndef BT_HCI_OP_LE_SET_HOST_FEATURE
@@ -163,9 +255,6 @@ static void sf32lb52_bt_normalize_event(uint8_t *data, size_t len)
       opcode = sf32lb52_bt_get_le16(&data[4]);
       if (opcode == BT_HCI_OP_RESET && data[6] != SF32LB52_HCI_STATUS_SUCCESS)
         {
-          syslog(LOG_INFO,
-                 "sf32lb52 bth4 normalize reset complete status 0x%02x\n",
-                 data[6]);
           data[6] = SF32LB52_HCI_STATUS_SUCCESS;
         }
     }
@@ -174,9 +263,6 @@ static void sf32lb52_bt_normalize_event(uint8_t *data, size_t len)
       opcode = sf32lb52_bt_get_le16(&data[5]);
       if (opcode == BT_HCI_OP_RESET && data[3] != SF32LB52_HCI_STATUS_SUCCESS)
         {
-          syslog(LOG_INFO,
-                 "sf32lb52 bth4 normalize reset status 0x%02x\n",
-                 data[3]);
           data[3] = SF32LB52_HCI_STATUS_SUCCESS;
         }
     }
@@ -286,11 +372,32 @@ static bool sf32lb52_bt_emulate_cmd(struct sf32lb52_bt_priv_s *priv,
                                               SF32LB52_HCI_RAND_RPLEN);
         return true;
 
+      case BT_HCI_OP_READ_LOCAL_EXT_FEATURES:
+        memset(params, 0, 11);
+        params[0] = SF32LB52_HCI_STATUS_SUCCESS;
+        *ret = sf32lb52_bt_synth_cmd_complete(priv, opcode, params, 11);
+        return true;
+
+      case BT_HCI_OP_READ_BUFFER_SIZE:
+        params[0] = SF32LB52_HCI_STATUS_SUCCESS;
+        sf32lb52_bt_put_le16(&params[1], 0x00fb);
+        params[3] = 0;
+        sf32lb52_bt_put_le16(&params[4], 4);
+        sf32lb52_bt_put_le16(&params[6], 0);
+        *ret = sf32lb52_bt_synth_cmd_complete(priv, opcode, params, 8);
+        return true;
+
       case BT_HCI_OP_LE_READ_BUFFER_SIZE:
         params[0] = SF32LB52_HCI_STATUS_SUCCESS;
         sf32lb52_bt_put_le16(&params[1], 0x00fb);
         params[3] = 4;
         *ret = sf32lb52_bt_synth_cmd_complete(priv, opcode, params, 4);
+        return true;
+
+      case BT_HCI_OP_LE_READ_LOCAL_FEATURES:
+        memset(params, 0, 9);
+        params[0] = SF32LB52_HCI_STATUS_SUCCESS;
+        *ret = sf32lb52_bt_synth_cmd_complete(priv, opcode, params, 9);
         return true;
 
       case BT_HCI_OP_LE_READ_MAX_DATA_LEN:
@@ -302,13 +409,43 @@ static bool sf32lb52_bt_emulate_cmd(struct sf32lb52_bt_priv_s *priv,
         *ret = sf32lb52_bt_synth_cmd_complete(priv, opcode, params, 9);
         return true;
 
+      case BT_HCI_OP_LE_READ_MAX_ADV_DATA_LEN:
+        params[0] = SF32LB52_HCI_STATUS_SUCCESS;
+        sf32lb52_bt_put_le16(&params[1], 31);
+        *ret = sf32lb52_bt_synth_cmd_complete(priv, opcode, params, 3);
+        return true;
+
       case BT_HCI_OP_LE_READ_SUPP_STATES:
         memset(params, 0, 9);
         *ret = sf32lb52_bt_synth_cmd_complete(priv, opcode, params, 9);
         return true;
 
+      case BT_HCI_OP_LE_READ_RL_SIZE:
+        params[0] = SF32LB52_HCI_STATUS_SUCCESS;
+        params[1] = 0;
+        *ret = sf32lb52_bt_synth_cmd_complete(priv, opcode, params, 2);
+        return true;
+
       case BT_HCI_OP_LE_WRITE_LE_HOST_SUPP:
       case BT_HCI_OP_LE_SET_HOST_FEATURE:
+      case BT_HCI_OP_LE_SET_EVENT_MASK:
+      case BT_HCI_OP_LE_WRITE_DEFAULT_DATA_LEN:
+      case BT_HCI_OP_LE_SET_RPA_TIMEOUT:
+      case BT_HCI_OP_SET_EVENT_MASK:
+      case BT_HCI_OP_SET_EVENT_MASK_PAGE_2:
+      case BT_HCI_OP_WRITE_LOCAL_NAME:
+      case BT_HCI_OP_WRITE_SCAN_ENABLE:
+      case BT_HCI_OP_WRITE_PAGE_SCAN_ACTIVITY:
+      case BT_HCI_OP_WRITE_INQUIRY_SCAN_ACTIVITY:
+      case BT_HCI_OP_WRITE_PAGE_TIMEOUT:
+      case BT_HCI_OP_WRITE_CLASS_OF_DEVICE:
+      case BT_HCI_OP_WRITE_INQUIRY_SCAN_TYPE:
+      case BT_HCI_OP_WRITE_EXTENDED_INQUIRY_RESPONSE:
+      case BT_HCI_OP_WRITE_INQUIRY_MODE:
+      case BT_HCI_OP_WRITE_PAGE_SCAN_TYPE:
+      case BT_HCI_OP_WRITE_SSP_MODE:
+      case BT_HCI_OP_WRITE_SC_HOST_SUPP:
+      case BT_HCI_OP_WRITE_DEFAULT_LINK_POLICY_SETTINGS:
       case BT_HCI_OP_HOST_BUFFER_SIZE:
       case BT_HCI_OP_SET_CTL_TO_HOST_FLOW:
         *ret = sf32lb52_bt_synth_status_complete(priv, opcode);
