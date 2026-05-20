@@ -92,6 +92,10 @@
 #define BAUD_RATE_2000000               2000000
 #define BAUD_RATE_3000000               3000000
 
+#ifndef CONFIG_UART_BAUD
+#  define CONFIG_UART_BAUD              BAUD_RATE_115200
+#endif
+
 #define DATA_BITS_5                     5
 #define DATA_BITS_6                     6
 #define DATA_BITS_7                     7
@@ -144,7 +148,7 @@
 /* Default config for serial_configure structure */
 #define RT_SERIAL_CONFIG_DEFAULT           \
 {                                          \
-    BAUD_RATE_1000000,            \
+    CONFIG_UART_BAUD,             \
     DATA_BITS_8,      /* 8 databits */     \
     STOP_BITS_1,      /* 1 stopbit */      \
     PARITY_NONE,      /* No parity  */     \

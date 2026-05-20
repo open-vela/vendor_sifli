@@ -61,7 +61,7 @@ void arm_earlyserialinit(void)
 
     /* 3. Configure UART parameters */
     g_early_uart_handle.Instance        = hwp_usart1;
-    g_early_uart_handle.Init.BaudRate   = 1000000;
+    g_early_uart_handle.Init.BaudRate   = CONFIG_UART_BAUD;
     g_early_uart_handle.Init.WordLength = UART_WORDLENGTH_8B;
     g_early_uart_handle.Init.StopBits   = UART_STOPBITS_1;
     g_early_uart_handle.Init.Parity     = UART_PARITY_NONE;

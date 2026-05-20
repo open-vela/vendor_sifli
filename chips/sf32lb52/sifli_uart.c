@@ -47,6 +47,7 @@
 #include <nuttx/config.h>
 #include "sf32lb_serial.h"
 #include <nuttx/power/pm.h>
+#include <nuttx/cache.h>
 
 #ifndef CONFIG_UART_BUFSZ
 #define CONFIG_UART_BUFSZ 512
@@ -54,6 +55,8 @@
 
 int uart_isr(int irq, FAR void *context, FAR void *arg);
 int uart_dma_isr(int irq, FAR void *context, FAR void *arg);
+
+#define SIFLI_UART_DMA_CACHE_ALIGN 32
 
 #include "dma_config.h"
 #include "uart_config.h"
@@ -458,6 +461,10 @@ static int sifli_dma_receive(struct uart_dev_s *dev)
     /* Reset last_index for DMA circular buffer tracking */
     uart->dma_rx.last_index = 0;
 
+    up_invalidate_dcache((uintptr_t)uart->serial.recv.buffer,
+                         (uintptr_t)uart->serial.recv.buffer +
+                         uart->serial.recv.size);
+
     /* Clear any pending DMA interrupts before starting */
     HAL_UART_Receive_DMA(&(uart->handle), (uint8_t*)uart->serial.recv.buffer, uart->serial.recv.size);
     /* Note: IRQ will be enabled in sifli_attach() after irq_attach() */
@@ -826,6 +833,10 @@ void HAL_UART_RxHalfCpltCallback(UART_HandleTypeDef *huart)
     /* Get current DMA write position */
     recv_total_index = uart->serial.recv.size - __HAL_DMA_GET_COUNTER(&uart->dma_rx.handle);
 
+    up_invalidate_dcache((uintptr_t)uart->serial.recv.buffer,
+                         (uintptr_t)uart->serial.recv.buffer +
+                         uart->serial.recv.size);
+
     /* In DMA circular mode, DMA writes directly to recv.buffer.
      * The head pointer should track DMA write position.
      * NuttX serial layer reads from tail to head.
@@ -907,7 +918,8 @@ static void sifli_uart_get_dma_config(void)
  *   that arm_earlyserialinit was called previously.
  *
  ****************************************************************************/
-static char g_uart_buffer[sizeof(uart_config)*2/sizeof(uart_config[0])][CONFIG_UART_BUFSZ];
+static char g_uart_buffer[sizeof(uart_config)*2/sizeof(uart_config[0])][CONFIG_UART_BUFSZ]
+    __attribute__((aligned(SIFLI_UART_DMA_CACHE_ALIGN)));
 
 int sifli_usart_init(void)
 {
