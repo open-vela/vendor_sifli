@@ -154,15 +154,41 @@ __HAL_ROM_USED HAL_StatusTypeDef HAL_HPAON_WakeCore(uint8_t core_id)
 #ifdef SF32LB52X
         uint32_t mask;
 #endif /* SF32LB52X */
-        hwp_hpsys_aon->ISSR |= HPSYS_AON_ISSR_HP2LP_REQ;
-        /* delay to ensure LCPU see the REQ, need one LP_CLK cycle, see: gitlab#1752,redmine#666, ext-redmine#663
-         * double the value for enough margin
+        /* Bounded LP_ACTIVE polling: original code spun forever waiting for
+         * LCPU to ACK; on single-core boards (no LCPU image, e.g. LCKFB
+         * Huangshan / sf32lb52_lchspi_ulp) LP_ACTIVE never asserts and HCPU
+         * locks up. Cap each wait at ~50 ms (50000 us) and return HAL_ERROR
+         * so callers can fall back gracefully.
          */
+
+        uint32_t guard;
+
+        hwp_hpsys_aon->ISSR |= HPSYS_AON_ISSR_HP2LP_REQ;
         HAL_Delay_us(230);
-        while (!(hwp_hpsys_aon->ISSR & HPSYS_AON_ISSR_LP_ACTIVE));
+
+        guard = 50000;
+        while (!(hwp_hpsys_aon->ISSR & HPSYS_AON_ISSR_LP_ACTIVE))
+        {
+            if (guard-- == 0)
+            {
+                return HAL_ERROR;
+            }
+
+            HAL_Delay_us(1);
+        }
+
         HAL_Delay_us(30);
-        /* delay to ensure HCPU see the updated LP_ACTIVE */
-        while (!(hwp_hpsys_aon->ISSR & HPSYS_AON_ISSR_LP_ACTIVE));
+
+        guard = 50000;
+        while (!(hwp_hpsys_aon->ISSR & HPSYS_AON_ISSR_LP_ACTIVE))
+        {
+            if (guard-- == 0)
+            {
+                return HAL_ERROR;
+            }
+
+            HAL_Delay_us(1);
+        }
 #ifdef SF32LB52X
         mask = HAL_DisableInterrupt();
         HAL_ASSERT(g_hal_hpaon_lcpu_wakeup_ref_cnt < 20);

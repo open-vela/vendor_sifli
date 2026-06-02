@@ -214,7 +214,7 @@ void BSP_PIN_Touch(void)
 {
     // Touch
     HAL_PIN_Set(PAD_PA09, GPIO_A9,  PIN_NOPULL, 1);    // CTP_RESET
-    HAL_PIN_Set(PAD_PA41, GPIO_A41, PIN_NOPULL, 1);    // CTP_INT
+    HAL_PIN_Set(PAD_PA41, GPIO_A41, PIN_PULLUP, 1);    // CTP_INT - PIN_PULLUP for FT6146 open-drain INT line
     HAL_PIN_Set(PAD_PA37, I2C1_SCL, PIN_PULLUP, 1);
     HAL_PIN_Set(PAD_PA33, I2C1_SDA, PIN_PULLUP, 1);
 }
