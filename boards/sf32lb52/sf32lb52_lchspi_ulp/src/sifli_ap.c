@@ -228,6 +228,8 @@ static int sf32lb52_tfcard_initialize(void)
 #define LCD_INIT_TASK_STACKSIZE 4096
 #define LCD_INIT_TASK_PRIORITY (SCHED_PRIORITY_DEFAULT - 5)
 
+static struct i2c_master_s *g_pending_touch_i2c = NULL;
+
 static int lcd_async_init_thread(int argc, FAR char *argv[])
 {
   int ret;
@@ -238,6 +240,21 @@ static int lcd_async_init_thread(int argc, FAR char *argv[])
       syslog(LOG_ERR, "ERROR: board_lcd_initialize failed: %d\n", ret);
       return ret;
     }
+
+#ifdef CONFIG_INPUT_FT6146
+  if (g_pending_touch_i2c != NULL)
+    {
+      usleep(80000);
+      ret = ft6146_touch_initialize(g_pending_touch_i2c,
+                                    GET_PIN_2(hwp_gpio1,
+                                              CONFIG_TOUCH_IRQ_PIN));
+      if (ret < 0)
+        {
+          syslog(LOG_ERR,
+                 "ERROR: ft6146_touch_initialize failed: %d\n", ret);
+        }
+    }
+#endif
 
   return OK;
 }
@@ -406,7 +423,9 @@ int sf32lb52_lchspi_ulp_bringup(void)
       return ret;
     }
 
-#ifdef CONFIG_INPUT_FT6146
+#if defined(CONFIG_INPUT_FT6146) && defined(CONFIG_LCD)
+  g_pending_touch_i2c = i2c0;
+#elif defined(CONFIG_INPUT_FT6146)
   ret = ft6146_touch_initialize(i2c0, GET_PIN_2(hwp_gpio1, CONFIG_TOUCH_IRQ_PIN));
   if (ret < 0)
     {

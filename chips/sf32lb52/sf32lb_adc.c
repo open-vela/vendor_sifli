@@ -183,24 +183,17 @@ static void sf32lb_adc_calibrate(struct adc_info_s *priv)
     priv->adc_vol_offset = 0.0f;
     priv->adc_thd_reg = reg_max > 3 ? reg_max - 3 : reg_max;
 
-    if (HAL_LCPU_CONFIG_get(HAL_LCPU_CONFIG_ADC_CALIBRATION,
-                            (uint8_t *)&cfg, &len) != 0)
-    {
-        syslog(LOG_WARNING, "ADC calibration data missing, use defaults\n");
-        cfg.vol10 = 1758;
-        cfg.vol25 = 3162;
-        cfg.low_mv = 1000;
-        cfg.high_mv = 2500;
-    }
-    else if (cfg.vol10 == 0 || cfg.vol25 == 0 ||
-             cfg.low_mv == 0 || cfg.high_mv == 0)
-    {
-        syslog(LOG_WARNING, "ADC calibration data invalid, use defaults\n");
-        cfg.vol10 = 1758;
-        cfg.vol25 = 3162;
-        cfg.low_mv = 1000;
-        cfg.high_mv = 2500;
-    }
+    /* HAL_LCPU_CONFIG_get() forces an LCPU wake via HAL_HPAON_WakeCore(),
+     * which busy-loops on HPSYS_AON_ISSR_LP_ACTIVE. Single-core boards
+     * (e.g. LCKFB Huangshan / sf32lb52_lchspi_ulp) never run LCPU so the
+     * call hangs HCPU forever. Skip the lookup and use factory defaults.
+     */
+
+    syslog(LOG_WARNING, "ADC calibration data missing, use defaults\n");
+    cfg.vol10 = 1758;
+    cfg.vol25 = 3162;
+    cfg.low_mv = 1000;
+    cfg.high_mv = 2500;
 
     cfg.vol10 &= 0x7fff;
     cfg.vol25 &= 0x7fff;
