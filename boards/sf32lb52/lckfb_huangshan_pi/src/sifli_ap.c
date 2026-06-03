@@ -435,7 +435,25 @@ int lckfb_huangshan_pi_bringup(void)
     }
 #endif
 
-#endif  
+#ifdef CONFIG_BSP_USING_I2C2
+  /* Initialize I2C bus 1 for charger (AW32001). */
+  struct i2c_master_s *i2c1 = NULL;
+
+  i2c1 = sifli_i2cbus_initialize(1);
+  if (i2c1 == NULL)
+    {
+      syslog(LOG_ERR, "ERROR: sifli_i2cbus_initialize(1) failed\n");
+    }
+  else
+    {
+      ret = i2c_register(i2c1, 1);
+      if (ret < 0)
+        {
+          syslog(LOG_ERR, "ERROR: i2c_register(/dev/i2c1) failed: %d\n", ret);
+        }
+    }
+#endif /* CONFIG_BSP_USING_I2C2 */
+#endif /* CONFIG_I2C */
 
 #if defined(CONFIG_SPI) && defined(CONFIG_BSP_USING_SPI1) && \
     defined(CONFIG_SPI_DRIVER)
