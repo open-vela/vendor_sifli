@@ -828,6 +828,17 @@ static int lcd_init_thread_entry(int argc, FAR char *argv[])
 
 	}
 
+	/* If find_right_driver fell back without running Init() (panel ReadID
+	 * mismatch is normal for some QSPI panels), make sure the panel is
+	 * actually programmed BEFORE lcddev_register / fb_register triggers
+	 * setpower() -> DisplayOn (REG 0x29). Otherwise the very first WriteReg
+	 * runs against an uninitialised LCDC controller and returns HAL_BUSY.
+	 */
+	if (p_drv_ops && p_drv_ops->p_ops && p_drv_ops->p_ops->Init)
+	{
+		p_drv_ops->p_ops->Init(&s_drv_lcd.hlcdc);
+	}
+
 	s_drv_lcd.p_drv_ops = p_drv_ops; 
 	sem_post(&s_drv_lcd.init_sem);
 
