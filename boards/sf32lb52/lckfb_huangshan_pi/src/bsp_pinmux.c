@@ -241,7 +241,6 @@ void BSP_PIN_LCD(void)
     HAL_PIN_Set(PAD_PA26, GPIO_A26, PIN_NOPULL, 1);    // VCC_3V3 power
     BSP_GPIO_Set(38, 1, 1);  // VSYS on
     BSP_GPIO_Set(26, 1, 1);  // 3V3 on
-    BSP_GPIO_Set(1, 1, 1);   // LCD VADD En
 
 #ifdef BSP_USING_TOUCHD
     BSP_PIN_Touch();
