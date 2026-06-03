@@ -214,15 +214,22 @@ static void LCD_Drv_Init(LCDC_HandleTypeDef *hlcdc)
     BSP_LCD_Reset(0);//Reset LCD
     LCD_DRIVER_DELAY_MS(10);
     BSP_LCD_Reset(1);
-    LCD_DRIVER_DELAY_MS(50);
+    LCD_DRIVER_DELAY_MS(120);
 
-    /* Align with reference CO5300 bringup flow: verify panel ID after reset
-     * and abort initialization if communication is not valid.
+    LCD_WriteReg(hlcdc, 0x01, (uint8_t *)NULL, 0);
+    LCD_DRIVER_DELAY_MS(120);
+
+    /* ReadID is informational only - some panels do not respond reliably
+     * to ID queries on USB-only power but still init/draw correctly.
+     * Log mismatch for diagnostics but proceed with panel init regardless.
      */
-    if (LCD_ReadID(hlcdc) != LCD_ID)
     {
-        lcdwarn("[co5300] ReadID mismatch, skip panel init");
-        return;
+        uint32_t pid = LCD_ReadID(hlcdc);
+        if (pid != LCD_ID)
+        {
+            lcdwarn("[co5300] ReadID=0x%lx expected 0x%x, init anyway",
+                    (unsigned long)pid, LCD_ID);
+        }
     }
 
     /* This board uses fixed panel config via Kconfig; avoid blocking ID read
