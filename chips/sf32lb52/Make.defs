@@ -40,6 +40,10 @@ ifeq ($(CONFIG_ADC),y)
 CHIP_CSRCS += sf32lb_adc.c
 endif
 
+ifeq ($(CONFIG_AUDIO),y)
+CHIP_CSRCS += sf32lb_audio.c
+endif
+
 ifeq ($(CONFIG_RTC),y)
 CHIP_CSRCS += sf32lb_rtc.c
 endif
