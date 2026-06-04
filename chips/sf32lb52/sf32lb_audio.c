@@ -39,24 +39,35 @@
 
 #include "bf0_hal.h"
 #include "bf0_hal_audcodec.h"
+#include "bf0_hal_audprc.h"
 #include "dma_config.h"
 
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
 
-/* The vendor dma_config.h only defines the ADC0 DMA mapping.  Provide the
- * DAC0 mapping here (DMA1 channel 8 is unused in the minimal NuttX config).
- */
+/* AUDPRC TX0 DMA — used for playback (AUDPRC → AUDCODEC DAC path). */
 
-#ifndef AUDCODEC_DAC0_DMA_INSTANCE
-#  define AUDCODEC_DAC0_DMA_INSTANCE   DMA1_Channel4
+#ifndef AUDPRC_TX0_DMA_INSTANCE
+#  define AUDPRC_TX0_DMA_INSTANCE   DMA1_Channel1
 #endif
-#ifndef AUDCODEC_DAC0_DMA_IRQ
-#  define AUDCODEC_DAC0_DMA_IRQ        DMAC1_CH4_IRQn
+#ifndef AUDPRC_TX0_DMA_IRQ
+#  define AUDPRC_TX0_DMA_IRQ        DMAC1_CH1_IRQn
 #endif
-#ifndef AUDCODEC_DAC0_DMA_REQUEST
-#  define AUDCODEC_DAC0_DMA_REQUEST    DMA_REQUEST_41
+#ifndef AUDPRC_TX0_DMA_REQUEST
+#  define AUDPRC_TX0_DMA_REQUEST    DMA_REQUEST_51
+#endif
+
+/* AUDCODEC ADC0 DMA — used for recording (direct codec ADC, opmode=1). */
+
+#ifndef AUDCODEC_ADC0_DMA_INSTANCE
+#  define AUDCODEC_ADC0_DMA_INSTANCE   DMA1_Channel4
+#endif
+#ifndef AUDCODEC_ADC0_DMA_IRQ
+#  define AUDCODEC_ADC0_DMA_IRQ        DMAC1_CH4_IRQn
+#endif
+#ifndef AUDCODEC_ADC0_DMA_REQUEST
+#  define AUDCODEC_ADC0_DMA_REQUEST    DMA_REQUEST_39
 #endif
 
 /* NuttX IRQ numbers are the Cortex-M exception number, i.e. the SiFli IRQn
@@ -164,7 +175,7 @@ static int sf32lb_audio_ioctl(struct audio_lowerhalf_s *dev, int cmd,
 
 static void sf32lb_audio_period_done(struct sf32lb_audio_s *priv);
 
-int sf32lb_audio_dac0_dma_isr(int irq, void *context, void *arg);
+int sf32lb_audio_audprc_tx0_dma_isr(int irq, void *context, void *arg);
 int sf32lb_audio_adc0_dma_isr(int irq, void *context, void *arg);
 
 /****************************************************************************
@@ -225,16 +236,17 @@ static const AUDCODE_ADC_CLK_CONFIG_TYPE g_adc_clk_cfg[9] =
 /* Shared codec hardware state. */
 
 static AUDCODEC_HandleTypeDef g_haudcodec;
+static AUDPRC_HandleTypeDef   g_haudprc;
 static DMA_HandleTypeDef      g_hdma_dac0;
 static DMA_HandleTypeDef      g_hdma_adc0;
+static DMA_HandleTypeDef      g_hdma_audprc_tx0;
 static bool                   g_codec_inited;
 static int                    g_pll_state = SF32LB_PLL_CLOSED;
 
-/* Route HAL channel-id callbacks back to the owning instance.
- * Index: 0=DAC_CH0, 1=DAC_CH1, 2=ADC_CH0, 3=ADC_CH1.
- */
+/* Separate instance pointers — AUDPRC and AUDCODEC channel ids overlap. */
 
-static struct sf32lb_audio_s *g_chan_priv[HAL_AUDCODEC_INSTANC_CNT];
+static struct sf32lb_audio_s *g_playback_priv;
+static struct sf32lb_audio_s *g_capture_priv;
 
 /****************************************************************************
  * Private Functions
@@ -374,16 +386,11 @@ static int sf32lb_audio_hw_init(void)
     }
 
   memset(&g_haudcodec, 0, sizeof(g_haudcodec));
-  memset(&g_hdma_dac0, 0, sizeof(g_hdma_dac0));
-  memset(&g_hdma_adc0, 0, sizeof(g_hdma_adc0));
+  memset(&g_haudprc,    0, sizeof(g_haudprc));
+  memset(&g_hdma_adc0,  0, sizeof(g_hdma_adc0));
+  memset(&g_hdma_audprc_tx0, 0, sizeof(g_hdma_audprc_tx0));
 
-  /* Link the DMA handles for DAC0 (playback) and ADC0 (capture).  The HAL
-   * performs HAL_DMA_Init() internally from HAL_AUDCODEC_Init().
-   */
-
-  g_hdma_dac0.Instance     = AUDCODEC_DAC0_DMA_INSTANCE;
-  g_hdma_dac0.Init.Request = AUDCODEC_DAC0_DMA_REQUEST;
-  g_haudcodec.hdma[HAL_AUDCODEC_DAC_CH0] = &g_hdma_dac0;
+  /* ── AUDCODEC: ADC0 for recording (direct codec, opmode=1) ── */
 
   g_hdma_adc0.Instance     = AUDCODEC_ADC0_DMA_INSTANCE;
   g_hdma_adc0.Init.Request = AUDCODEC_ADC0_DMA_REQUEST;
@@ -391,8 +398,8 @@ static int sf32lb_audio_hw_init(void)
 
   g_haudcodec.Instance        = hwp_audcodec;
   g_haudcodec.Init.en_dly_sel = 0;
-  g_haudcodec.Init.dac_cfg.opmode = 1;
-  g_haudcodec.Init.adc_cfg.opmode = 1;
+  g_haudcodec.Init.dac_cfg.opmode = 0;  /* playback via AUDPRC */
+  g_haudcodec.Init.adc_cfg.opmode = 1;  /* capture direct codec */
 
   HAL_PMU_EnableAudio(1);
   HAL_RCC_EnableModule(RCC_MOD_AUDCODEC_HP);
@@ -404,14 +411,69 @@ static int sf32lb_audio_hw_init(void)
       return -EIO;
     }
 
-  auderr("AUDCODEC HW init v4 ch4: DAC0 DMA=ch%d IRQ=%d, ADC0 DMA=ch%d IRQ=%d\n",
-         AUDCODEC_DAC0_DMA_INSTANCE, AUDCODEC_DAC0_DMA_IRQ,
+  auderr("AUDCODEC init OK: ADC0 DMA=ch%d IRQ=%d\n",
          AUDCODEC_ADC0_DMA_INSTANCE, AUDCODEC_ADC0_DMA_IRQ);
 
-  /* Attach the DMA interrupt vectors (HAL drives the transfers). */
+  /* ── AUDPRC: TX0 for playback (AUDPRC → AUDCODEC DAC) ── */
 
-  irq_attach(SIFLI_IRQ(AUDCODEC_DAC0_DMA_IRQ),
-             sf32lb_audio_dac0_dma_isr, NULL);
+  g_hdma_audprc_tx0.Instance     = AUDPRC_TX0_DMA_INSTANCE;
+  g_hdma_audprc_tx0.Init.Request = AUDPRC_TX0_DMA_REQUEST;
+  g_haudprc.hdma[HAL_AUDPRC_TX_CH0] = &g_hdma_audprc_tx0;
+
+  g_haudprc.Instance = hwp_audprc;
+
+  /* Use xtal clock source, div=1 (÷2) to get ~24MHz for AUDPRC. */
+
+  g_haudprc.Init.clk_sel = 0;
+  g_haudprc.Init.clk_div = 1;
+
+  /* Default DAC path: match SDK bf0_adc_dac_path_cfg_init +
+   * audio_server override (0x5050 = src0=0, src1=5 mute). */
+
+  g_haudprc.Init.dac_cfg.dst_sel    = 0;   /* to codec */
+  g_haudprc.Init.dac_cfg.mixrsrc1   = 5;   /* mute */
+  g_haudprc.Init.dac_cfg.mixrsrc0   = 0;   /* TX0 → right mixer */
+  g_haudprc.Init.dac_cfg.mixlsrc1   = 5;   /* mute */
+  g_haudprc.Init.dac_cfg.mixlsrc0   = 0;   /* TX0 → left mixer */
+  g_haudprc.Init.dac_cfg.vol_r      = 0;
+  g_haudprc.Init.dac_cfg.vol_l      = 0;
+  g_haudprc.Init.dac_cfg.src_ch_en  = 1;   /* stereo enable */
+  g_haudprc.Init.dac_cfg.src_hbf1_en = 0;
+  g_haudprc.Init.dac_cfg.src_hbf2_en = 0;
+  g_haudprc.Init.dac_cfg.src_hbf3_en = 0;
+  g_haudprc.Init.dac_cfg.eq_clr     = 0;
+  g_haudprc.Init.dac_cfg.eq_stage   = 1;
+  g_haudprc.Init.dac_cfg.eq_ch_en   = 0;
+  g_haudprc.Init.dac_cfg.muxrsrc1   = 5;   /* mute */
+  g_haudprc.Init.dac_cfg.muxrsrc0   = 0;   /* TX0 → mux right */
+  g_haudprc.Init.dac_cfg.muxlsrc1   = 5;   /* mute */
+  g_haudprc.Init.dac_cfg.muxlsrc0   = 0;   /* TX0 → mux left */
+  g_haudprc.Init.dac_cfg.src_sinc_en = 0;
+  g_haudprc.Init.dac_cfg.sinc_ratio = 0;
+
+  g_haudprc.Init.adc_div = 1;
+  g_haudprc.Init.dac_div = 1;
+
+  HAL_RCC_EnableModule(RCC_MOD_AUDPRC);
+
+  if (HAL_AUDPRC_Init(&g_haudprc) != HAL_OK)
+    {
+      auderr("HAL_AUDPRC_Init failed\n");
+      return -EIO;
+    }
+
+  /* HAL_AUDPRC_Init leaves the block disabled.  Enable it in
+   * start() after DMA is configured to match the SDK order. */
+
+  __HAL_AUDPRC_CLK_XTAL(&g_haudprc);
+
+  auderr("AUDPRC init OK: TX0 DMA=ch%d IRQ=%d\n",
+         AUDPRC_TX0_DMA_INSTANCE, AUDPRC_TX0_DMA_IRQ);
+
+  /* ── ISRs ── */
+
+  irq_attach(SIFLI_IRQ(AUDPRC_TX0_DMA_IRQ),
+             sf32lb_audio_audprc_tx0_dma_isr, NULL);
   irq_attach(SIFLI_IRQ(AUDCODEC_ADC0_DMA_IRQ),
              sf32lb_audio_adc0_dma_isr, NULL);
 
@@ -528,6 +590,22 @@ static int sf32lb_audio_configure(struct audio_lowerhalf_s *dev,
               (AUDCODE_DAC_CLK_CONFIG_TYPE *)&g_dac_clk_cfg[index];
             HAL_AUDCODEC_Config_TChanel(&g_haudcodec, 0,
                                         &g_haudcodec.Init.dac_cfg);
+
+            /* Set AUDPRC clock dividers for this sample rate. */
+
+            {
+              /* clk_div = 48MHz / samplerate (from SDK audprc_clk_cfg_tb_xtal) */
+              static const uint16_t audprc_div[9] = {
+                1000, 1500, 2000, 3000, 4000, 6000, 1000, 2000, 4000
+              };
+
+              g_haudprc.Init.adc_div = audprc_div[index];
+              g_haudprc.Init.dac_div = audprc_div[index];
+
+              __HAL_AUDPRC_STB_DIV_CLK(&g_haudprc,
+                                       g_haudprc.Init.adc_div,
+                                       g_haudprc.Init.dac_div);
+            }
           }
         else
           {
@@ -592,51 +670,49 @@ static int sf32lb_audio_start(struct audio_lowerhalf_s *dev)
       AUDCODE_DAC_CLK_CONFIG_TYPE *dac_clk =
         g_haudcodec.Init.dac_cfg.dac_clk;
 
-      auderr("PLAY start: clk_src=%d rate=%lu sel_clk_dac=%d sel_clk_src=%d\n",
-             dac_clk->clk_src_sel, (unsigned long)dac_clk->samplerate,
-             dac_clk->sel_clk_dac, dac_clk->sel_clk_dac_source);
+
+      if (!dac_clk)
+        {
+              return -EINVAL;
+        }
 
       sf32lb_audio_pll_config(dac_clk->clk_src_sel, dac_clk->samplerate);
-      auderr("PLAY: pll configured, state=%d\n", g_pll_state);
 
       up_clean_dcache((uintptr_t)priv->alloc_addr,
                       (uintptr_t)priv->alloc_addr + size);
 
-      if (HAL_AUDCODEC_Transmit_DMA(&g_haudcodec, priv->alloc_addr, size,
-                                     HAL_AUDCODEC_DAC_CH0) != HAL_OK)
+      /* ── AUDPRC path: CPU → AUDPRC TX0 → AUDCODEC DAC ── */
+
+      /* 1. Configure TX0 channel and start DMA. */
+
+      g_haudprc.cfg.mode   = 0;  /* mono */
+      g_haudprc.cfg.format = 0;  /* 16-bit */
+      g_haudprc.cfg.en     = 1;
+      g_haudprc.cfg.dma_mask = 1;
+
+      HAL_AUDPRC_Config_TChanel(&g_haudprc, 0, &g_haudprc.cfg);
+
+      if (HAL_AUDPRC_Transmit_DMA(&g_haudprc, priv->alloc_addr, size,
+                                   HAL_AUDPRC_TX_CH0) != HAL_OK)
         {
-          auderr("Transmit_DMA failed\n");
           return -EIO;
         }
 
-      auderr("PLAY: DMA started, size=%lu\n", (unsigned long)size);
-      up_enable_irq(SIFLI_IRQ(AUDCODEC_DAC0_DMA_IRQ));
+      up_enable_irq(SIFLI_IRQ(AUDPRC_TX0_DMA_IRQ));
+
+      /* 2. Enable AUDPRC (must be AFTER DMA start, matching SDK). */
+
+      __HAL_AUDPRC_ENABLE(&g_haudprc);
+
+      /* 3. Enable AUDCODEC DAC → unmute → PA. */
 
       __HAL_AUDCODEC_DAC_ENABLE(&g_haudcodec);
-      auderr("PLAY: DAC enabled\n");
-
-      /* Start muted to avoid power-on pop, then unmute after the analog
-       * path is fully settled.
-       */
-
       HAL_AUDCODEC_Config_DACPath(&g_haudcodec, 1);
       HAL_AUDCODEC_Config_Analog_DACPath(dac_clk);
-      auderr("PLAY: analog DAC path configured\n");
-
-      /* Set a reasonable DAC volume and unmute.  Channel 0 is DAC0.
-       * Volume 0x00 = max, 0xFF = mute.  Use 0x30 as a safe mid-level.
-       */
-
       HAL_AUDCODEC_Config_DACPath_Volume(&g_haudcodec, 0, 54);
       HAL_AUDCODEC_Config_DACPath(&g_haudcodec, 0);
-      auderr("PLAY: DAC unmuted, volume=54\n");
-
-      /* Enable the external PA only after the codec output is live to
-       * minimise the power-on pop.
-       */
 
       sf32lb_audio_pa_set(1);
-      auderr("PLAY: PA set HIGH (gpio1 pin42)\n");
     }
   else
     {
@@ -688,15 +764,15 @@ static int sf32lb_audio_stop(struct audio_lowerhalf_s *dev)
 
           sf32lb_audio_pa_set(0);
 
-          up_disable_irq(SIFLI_IRQ(AUDCODEC_DAC0_DMA_IRQ));
-          HAL_AUDCODEC_DMAStop(&g_haudcodec, HAL_AUDCODEC_DAC_CH0);
+          /* Stop AUDPRC TX0 DMA (feeds the DAC pipeline). */
 
-          /* HAL DMAStop omits state reset — clear it ourselves so the next
-           * Transmit_DMA / Receive_DMA call does not return HAL_BUSY.
-           */
+          up_disable_irq(SIFLI_IRQ(AUDPRC_TX0_DMA_IRQ));
+          HAL_AUDPRC_DMAStop(&g_haudprc, HAL_AUDPRC_TX_CH0);
 
-          g_haudcodec.State[HAL_AUDCODEC_DAC_CH0] =
-            HAL_AUDCODEC_STATE_READY;
+          g_haudprc.State[HAL_AUDPRC_TX_CH0] =
+            HAL_AUDPRC_STATE_READY;
+
+          /* Shut down the AUDCODEC DAC output path. */
 
           HAL_AUDCODEC_Config_DACPath(&g_haudcodec, 1);
           HAL_AUDCODEC_Close_Analog_DACPath();
@@ -1003,9 +1079,9 @@ static void sf32lb_audio_period_done(struct sf32lb_audio_s *priv)
  * Name: HAL DMA interrupt service routines
  ****************************************************************************/
 
-int sf32lb_audio_dac0_dma_isr(int irq, void *context, void *arg)
+int sf32lb_audio_audprc_tx0_dma_isr(int irq, void *context, void *arg)
 {
-  HAL_DMA_IRQHandler(g_haudcodec.hdma[HAL_AUDCODEC_DAC_CH0]);
+  HAL_DMA_IRQHandler(g_haudprc.hdma[HAL_AUDPRC_TX_CH0]);
   return OK;
 }
 
@@ -1016,45 +1092,35 @@ int sf32lb_audio_adc0_dma_isr(int irq, void *context, void *arg)
 }
 
 /****************************************************************************
- * Name: HAL weak callback overrides
- *
- * Description:
- *   The HAL dispatches these for the matching DMA channel.  Both the half
- *   and the full transfer complete events map to a single period of one
- *   buffer.
- *
+ * Name: HAL weak callback overrides (AUDPRC TX — playback)
  ****************************************************************************/
 
-void HAL_AUDCODEC_TxHalfCpltCallback(AUDCODEC_HandleTypeDef *hacodec, int cid)
+void HAL_AUDPRC_TxHalfCpltCallback(AUDPRC_HandleTypeDef *haprc, int cid)
 {
-  if (cid >= 0 && cid < HAL_AUDCODEC_INSTANC_CNT)
-    {
-      sf32lb_audio_period_done(g_chan_priv[cid]);
-    }
+  (void)cid;
+  sf32lb_audio_period_done(g_playback_priv);
 }
 
-void HAL_AUDCODEC_TxCpltCallback(AUDCODEC_HandleTypeDef *hacodec, int cid)
+void HAL_AUDPRC_TxCpltCallback(AUDPRC_HandleTypeDef *haprc, int cid)
 {
-  if (cid >= 0 && cid < HAL_AUDCODEC_INSTANC_CNT)
-    {
-      sf32lb_audio_period_done(g_chan_priv[cid]);
-    }
+  (void)cid;
+  sf32lb_audio_period_done(g_playback_priv);
 }
+
+/****************************************************************************
+ * Name: HAL weak callback overrides (AUDCODEC RX — recording)
+ ****************************************************************************/
 
 void HAL_AUDCODEC_RxHalfCpltCallback(AUDCODEC_HandleTypeDef *hacodec, int cid)
 {
-  if (cid >= 0 && cid < HAL_AUDCODEC_INSTANC_CNT)
-    {
-      sf32lb_audio_period_done(g_chan_priv[cid]);
-    }
+  (void)cid;
+  sf32lb_audio_period_done(g_capture_priv);
 }
 
 void HAL_AUDCODEC_RxCpltCallback(AUDCODEC_HandleTypeDef *hacodec, int cid)
 {
-  if (cid >= 0 && cid < HAL_AUDCODEC_INSTANC_CNT)
-    {
-      sf32lb_audio_period_done(g_chan_priv[cid]);
-    }
+  (void)cid;
+  sf32lb_audio_period_done(g_capture_priv);
 }
 
 /****************************************************************************
@@ -1079,7 +1145,10 @@ static struct sf32lb_audio_s *sf32lb_audio_create(bool playback)
   dq_init(&priv->pendq);
   spin_lock_init(&priv->lock);
 
-  g_chan_priv[priv->did] = priv;
+  if (priv->playback)
+    g_playback_priv = priv;
+  else
+    g_capture_priv = priv;
 
   return priv;
 }
@@ -1139,8 +1208,8 @@ int sf32lb_audio_initialize(void)
   return OK;
 
 err:
-  g_chan_priv[HAL_AUDCODEC_DAC_CH0] = NULL;
-  g_chan_priv[HAL_AUDCODEC_ADC_CH0] = NULL;
+  g_playback_priv = NULL;
+  g_capture_priv = NULL;
   kmm_free(play);
   kmm_free(capture);
   return ret;
