@@ -25,7 +25,7 @@ DevKit-LCD 与 [SF32LB52-LCHSPI-ULP](../sf32lb52_lchspi_ulp) 参考板和
 - **默认面向 xTS 测试**：DevKit-LCD 默认 ship 一份面向 xTS 的配置
   （CMocka、TESTS_TESTSUITES、GETPRIME、SCANFTEST、FSTEST、RAMTEST、
   CM_MM_TEST、CM_SCHED_TEST、popen / pipe 示例……），便于把这块板
-  复用为 SF32LB52 的 **Vela xTS** 硬件挂机工位。需要图形化 demo 时
+  复用为 SF32LB52 的 **openvela xTS** 硬件挂机工位。需要图形化 demo 时
   可在 `menuconfig` 中重新打开 LVGL。
 - **NOR 文件系统分区**位于 flash2 的 `0x008A0000` 偏移
   （LCHSPI-ULP 是 `0x009A0000`）；链接脚本 XIP 入口（`0x12010000`）
@@ -190,7 +190,7 @@ nsh> uname -a
 NuttX 0.0.0 ... arm sf32lb52_devkit_lcd
 ```
 
-### Vela xTS 自测
+### openvela xTS 自测
 
 `nsh` defconfig 默认启用 openvela 的 testing-suite app 集合，14 个
 xTS 用例可直接在 `nsh>` 下手动跑一遍：
@@ -265,13 +265,9 @@ assert b"PASSED" in out
    + getprime / scanftest / fstest / ramtest / cm_mm_test /
    cm_sched_test / popen / pipe）。需要图形 demo 时通过 `menuconfig`
    重新打开 LVGL。
-3. CO5300 屏在仅 USB 供电场景下不一定可靠回应 QSPI ID 查询；LCD 驱动
-   会打印 `[co5300] ReadID=0x0 expected 0x331100, init anyway` 然后
-   继续初始化。这是预期行为 —— 屏幕能正确接受 SLPOUT / DISPON 命令
-   并正常显示。共享驱动层 commit `0a3cd0a` 修复的 race 也覆盖本板。
-4. 默认板不引出 SD 卡（`LCD_52J_SD` 子型号在 deep-sleep 中通过 PA21
+3. 默认板不引出 SD 卡（`LCD_52J_SD` 子型号在 deep-sleep 中通过 PA21
    暴露 TF 接口）。
-5. RTS-to-VCC-load-switch 意味着 Linux 默认 `termios` 串口 open 会让
+4. RTS-to-VCC-load-switch 意味着 Linux 默认 `termios` 串口 open 会让
    SoC 持续处于复位态。交互式控制台请使用 `picocom --lower-rts
    --lower-dtr`，或者上面的 pyserial 脚本。
 
