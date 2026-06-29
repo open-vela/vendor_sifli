@@ -84,6 +84,15 @@ as `PB05`, but it is the same physical net as PA05.
 
 ## Build
 
+### Toolchain Version Requirements
+
+| Tool | Minimum Version |
+|------|----------------|
+| arm-none-eabi-gcc | 10.3 |
+| cmake | 3.22 |
+| ninja | 1.10 |
+| python3 | 3.10 |
+
 ```bash
 cmake -B cmake_out/lckfb_huangshan_pi -S "$PWD/nuttx" -GNinja \
   -DBOARD_CONFIG=../vendor/sifli/boards/sf32lb52/lckfb_huangshan_pi/configs/nsh \
@@ -106,6 +115,41 @@ auto-reset pattern that ESP-IDF / `esptool.py` use on ESP32 boards.
 **Automated flashing and self-testing rely on this wiring** — do not
 cut or pull-up the trace if you intend to use `sftool` from CI.
 
+### Installing sftool
+
+`sftool` is an open-source serial flashing tool for SiFli SoCs (SF32LB52 /
+SF32LB56 / SF32LB58). Choose one of two installation methods:
+
+**Option 1: Prebuilt binary** (recommended, no build toolchain required)
+
+Download the `sftool-v{version}-{target}.tar.xz` matching your system
+architecture from [GitHub Releases](https://github.com/OpenSiFli/sftool/releases),
+extract and place `sftool` in your `PATH`:
+
+```bash
+# Example: x86_64 Linux
+curl -L -o /tmp/sftool.tar.xz \
+  https://github.com/OpenSiFli/sftool/releases/download/0.2.5/sftool-0.2.5-x86_64-unknown-linux-gnu.tar.xz
+tar xf /tmp/sftool.tar.xz -C /tmp && sudo mv /tmp/sftool /usr/local/bin/
+sftool --version    # verify installation
+```
+
+**Option 2: Cargo build**
+
+```bash
+cargo install sftool
+```
+
+### Serial Port Permissions
+
+On Linux, `/dev/ttyUSB*` belongs to the `root:dialout` group by default;
+unprivileged users cannot access it. Add yourself to the `dialout` group
+(**re-login or reboot required to take effect**):
+
+```bash
+sudo usermod -aG dialout $USER
+```
+
 ```bash
 # Erase + write nuttx.bin to NOR @ 0x12010000, then soft-reset into NSH
 sftool -c SF32LB52 -p /dev/ttyUSB0 -b 1000000 \
@@ -117,7 +161,14 @@ If `sftool` reports `Failed to connect to the chip`, the SoC's ROM
 bootloader missed the ~2 s `ATSF32` listen window after RTS reset —
 re-plug the USB cable and retry. If the board boot-loops printing only
 `SFBL`, the AMOLED panel is browning out the USB rail; use a 5 V/2 A
-wall charger or a battery, not a high-impedance laptop USB-A port.
+wall charger or a battery, not a high-impedance laptop USB-A port. If
+you experience frequent timeouts or checksum failures, retry with the
+`--compat` compatibility flag:
+
+```bash
+sftool -c SF32LB52 -p /dev/ttyUSB0 --compat \
+       write_flash nuttx.bin@0x12010000
+```
 
 ## First Boot & Quick Tests
 

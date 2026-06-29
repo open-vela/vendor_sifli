@@ -79,6 +79,15 @@ vendor/sifli/boards/sf32lb52/lckfb_huangshan_pi/
 
 ## 编译
 
+### 工具链版本要求
+
+| 工具 | 最低版本 |
+|------|---------|
+| arm-none-eabi-gcc | 10.3 |
+| cmake | 3.22 |
+| ninja | 1.10 |
+| python3 | 3.10 |
+
 ```bash
 cmake -B cmake_out/lckfb_huangshan_pi -S "$PWD/nuttx" -GNinja \
   -DBOARD_CONFIG=../vendor/sifli/boards/sf32lb52/lckfb_huangshan_pi/configs/nsh \
@@ -100,6 +109,40 @@ CH340N USB-UART 桥接芯片的 **RTS 引脚直连到 SF32LB52 的复位信号**
 reset 机制完全相同。**自动烧录和自测都依赖这个走线** —— 如果要在 CI 中
 使用 `sftool`，请勿切断或上拉这条走线。
 
+### 安装 sftool
+
+`sftool` 是 SiFli 开源串口烧录工具，支持 SF32LB52 / SF32LB56 / SF32LB58
+等芯片。安装方式二选一：
+
+**方式一：下载预编译包**（推荐，免编译环境）
+
+从 [GitHub Releases](https://github.com/OpenSiFli/sftool/releases) 下载
+与本机架构匹配的 `sftool-v{version}-{target}.tar.xz`，解压后将 `sftool`
+放到 `PATH` 中即可：
+
+```bash
+# 以 x86_64 Linux 为例
+curl -L -o /tmp/sftool.tar.xz \
+  https://github.com/OpenSiFli/sftool/releases/download/0.2.5/sftool-0.2.5-x86_64-unknown-linux-gnu.tar.xz
+tar xf /tmp/sftool.tar.xz -C /tmp && sudo mv /tmp/sftool /usr/local/bin/
+sftool --version    # 验证安装
+```
+
+**方式二：Cargo 编译安装**
+
+```bash
+cargo install sftool
+```
+
+### 串口权限
+
+Linux 下 `/dev/ttyUSB*` 默认属于 `root:dialout` 组，普通用户无权访问。
+需要将自己加入 `dialout` 组（**加完后需重新登录或重启生效**）：
+
+```bash
+sudo usermod -aG dialout $USER
+```
+
 ```bash
 # 擦除 + 把 nuttx.bin 烧到 NOR @ 0x12010000，再 soft-reset 进入 NSH
 sftool -c SF32LB52 -p /dev/ttyUSB0 -b 1000000 \
@@ -111,7 +154,13 @@ sftool -c SF32LB52 -p /dev/ttyUSB0 -b 1000000 \
 bootloader 错过了 RTS 复位后约 2 秒的 `ATSF32` 监听窗口 —— 重新插拔
 USB 后重试。如果板子只打印 `SFBL` 反复重启，说明 AMOLED 屏幕拉低了
 USB 电源轨；改用 5 V/2 A 充电头或电池供电，不要用阻抗较高的笔记本
-USB-A 口。
+USB-A 口。如果频繁遇到超时或校验失败，可加 `--compat` 兼容模式参数
+重试：
+
+```bash
+sftool -c SF32LB52 -p /dev/ttyUSB0 --compat \
+       write_flash nuttx.bin@0x12010000
+```
 
 ## 首次启动 & 快速验证
 
