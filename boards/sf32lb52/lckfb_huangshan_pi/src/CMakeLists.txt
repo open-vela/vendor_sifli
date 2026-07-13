@@ -54,6 +54,14 @@ target_compile_options(board PRIVATE
     $<$<COMPILE_LANGUAGE:C>:-w>
     $<$<COMPILE_LANGUAGE:CXX>:-w>)
 
+# QuickApp prebuilt libraries
+if(CONFIG_QUICKAPP)
+  file(GLOB QUICKAPP_LIBS "${NUTTX_BOARD_ABS_DIR}/../libs/nsh_cmake/*.a")
+  if(QUICKAPP_LIBS)
+    nuttx_add_extra_library(${QUICKAPP_LIBS})
+  endif()
+endif()
+
 if(CONFIG_CRYPTO)
   nuttx_add_application(
     NAME

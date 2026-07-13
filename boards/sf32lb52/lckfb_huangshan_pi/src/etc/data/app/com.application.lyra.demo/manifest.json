@@ -1,0 +1,179 @@
+{
+  "package": "com.application.lyra.demo",
+  "name": "天琴demo",
+  "versionName": "1.0.0",
+  "versionCode": 1,
+  "minPlatformVersion": 1000,
+  "icon": "/common/logo.png",
+  "deviceTypeList": [
+    "watch"
+  ],
+  "features": [
+    {
+      "name": "system.internal.messagecenter"
+    },
+    {
+      "name": "system.velaclaw"
+    },
+    {
+      "name": "system.record"
+    },
+    {
+      "name": "system.storage"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "hapjs.permission.APPFUNCTION"
+    },
+    {
+      "name": "hapjs.permission.RECORD"
+    }
+  ],
+  "appFunctions": {
+    "functions": [
+      {
+        "id": "createNote",
+        "description": "创建一条新备忘录",
+        "operationType": "create",
+        "handler": "appFunctions.createNote",
+        "preconditions": {
+          "requiresAuth": true,
+          "requiresCapabilities": [
+            "storage"
+          ]
+        },
+        "confirmation": {
+          "required": false
+        },
+        "parameters": {
+          "title": {
+            "type": "string",
+            "description": "备忘录标题",
+            "required": true,
+            "maxLength": 100
+          },
+          "content": {
+            "type": "string",
+            "description": "备忘录内容",
+            "required": true,
+            "maxLength": 10000
+          }
+        },
+        "returns": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "number",
+              "description": "备忘录ID"
+            },
+            "title": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string"
+            },
+            "createdAt": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "id": "listNotes",
+        "description": "列出所有备忘录",
+        "operationType": "query",
+        "handler": "appFunctions.listNotes",
+        "preconditions": {
+          "requiresAuth": true
+        },
+        "parameters": {},
+        "returns": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "number"
+              },
+              "title": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "deleteNote",
+        "description": "删除一条备忘录，不可撤销",
+        "operationType": "delete",
+        "handler": "appFunctions.deleteNote",
+        "preconditions": {
+          "requiresAuth": true
+        },
+        "confirmation": {
+          "required": true,
+          "promptTemplate": "确认删除备忘录「${title}」吗？此操作不可撤销。"
+        },
+        "constraints": {
+          "rateLimitPerMinute": 10
+        },
+        "parameters": {
+          "noteId": {
+            "type": "number",
+            "description": "要删除的备忘录ID",
+            "required": true
+          },
+          "title": {
+            "type": "string",
+            "description": "备忘录标题（用于确认提示）"
+          }
+        },
+        "returns": {
+          "type": "object",
+          "properties": {
+            "deleted": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "config": {
+    "logLevel": "log",
+    "designWidth": 466
+  },
+  "router": {
+    "entry": "pages/velaclaw",
+    "pages": {
+      "pages/index": {
+        "component": "index"
+      },
+      "pages/longlist": {
+        "component": "index"
+      },
+      "pages/velaclaw": {
+        "component": "index"
+      },
+      "pages/connectivity": {
+        "component": "index"
+      },
+      "pages/appfunction": {
+        "component": "index"
+      }
+    }
+  },
+  "minAPILevel": 1,
+  "packageInfo": {
+    "toolkit": "2.0.3",
+    "timeStamp": "2026-05-27T06:12:45.792Z",
+    "node": "v22.22.2",
+    "platform": "linux",
+    "arch": "x64",
+    "component": true
+  }
+}
