@@ -1,0 +1,44 @@
+{
+  "package": "com.calculator.vela",
+  "name": "计算器",
+  "versionName": "1.0.0",
+  "versionCode": 1,
+  "minPlatformVersion": 1000,
+  "icon": "/resources/base/media/logo.png",
+  "deviceTypeList": [
+    "watch"
+  ],
+  "features": [
+    {
+      "name": "system.app"
+    },
+    {
+      "name": "system.device"
+    }
+  ],
+  "config": {
+    "logLevel": "log",
+    "designWidth": 466
+  },
+  "display": {
+    "backgroundColor": "#000000",
+    "textColor": "#ffffff"
+  },
+  "router": {
+    "entry": "pages/index",
+    "pages": {
+      "pages/index": {
+        "component": "index"
+      }
+    }
+  },
+  "minAPILevel": 1,
+  "packageInfo": {
+    "toolkit": "2.0.5",
+    "timeStamp": "2025-12-02T13:20:56.812Z",
+    "node": "v20.18.1",
+    "platform": "linux",
+    "arch": "x64",
+    "component": true
+  }
+}

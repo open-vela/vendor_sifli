@@ -1,0 +1,2 @@
+sleep 3
+vapp hap://app/com.application.lyra.demo &

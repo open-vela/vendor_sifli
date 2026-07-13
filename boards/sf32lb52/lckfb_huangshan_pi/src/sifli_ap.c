@@ -48,6 +48,9 @@
 #include <nuttx/timers/pwm.h>
 #include <nuttx/timers/timer.h>
 #include <nuttx/video/fb.h>
+#if defined(CONFIG_I2C) && defined(CONFIG_SENSORS_LSM6DSL)
+#  include <nuttx/sensors/lsm6dsl.h>
+#endif
 #if defined(CONFIG_SPI) && defined(CONFIG_BSP_USING_SPI1)
 #  include <nuttx/spi/spi.h>
 #  include "sf32lb_spi.h"
@@ -81,6 +84,13 @@ extern int sf32lb_nor_automount(int minor, int block_offset, int block_count);
 
 #if defined(CONFIG_SPI) && defined(CONFIG_BSP_USING_SPI1)
 #  define SF32LB52_SPI1_PORT           0
+#endif
+
+#if defined(CONFIG_I2C) && defined(CONFIG_SENSORS_LSM6DSL)
+#  define SF32LB52_LSM6DS3_I2C_BUS     1
+#  define SF32LB52_LSM6DS3_DEVPATH     "/dev/lsm6dsl0"
+#  define SF32LB52_LSM6DS3_LDO_PIN     GET_PIN_2(hwp_gpio1, 30)
+#  define SF32LB52_LSM6DS3_INT_PIN     GET_PIN_2(hwp_gpio1, 31)
 #endif
 
 #if defined(CONFIG_SPI) && defined(CONFIG_MMCSD_SPI) && \
@@ -220,6 +230,56 @@ static int sf32lb52_tfcard_initialize(void)
 #endif
 #endif
 
+#if defined(CONFIG_I2C) && defined(CONFIG_SENSORS_LSM6DSL)
+static int sf32lb52_lsm6ds3_initialize(FAR struct i2c_master_s *i2c)
+{
+  int ret;
+
+  /* LSM6DS3TR-C is register-compatible enough with the in-tree LSM6DSL
+   * test driver for board bringup.  The board wiring is:
+   *   PA39 - I2C2 SDA
+   *   PA40 - I2C2 SCL
+   *   PA31 - INT
+   *   PA30 - sensor LDO enable, active high
+   */
+
+  HAL_PIN_Set(PAD_PA30, GPIO_A30, PIN_NOPULL, 1);
+  sifli_gpio_config(SF32LB52_LSM6DS3_LDO_PIN, GPIO_OUTPUT);
+  sifli_gpio_write(SF32LB52_LSM6DS3_LDO_PIN, true);
+  usleep(10000);
+
+  HAL_PIN_Set(PAD_PA31, GPIO_A31, PIN_PULLUP, 1);
+  sifli_gpio_config(SF32LB52_LSM6DS3_INT_PIN, GPIO_INPUT);
+
+  ret = lsm6dsl_sensor_register(SF32LB52_LSM6DS3_DEVPATH,
+                                i2c,
+                                LSM6DSLACCEL_ADDR0);
+  if (ret < 0)
+    {
+      syslog(LOG_WARNING,
+             "WARN: LSM6DS3 not found at 0x%02x on I2C%d: %d\n",
+             LSM6DSLACCEL_ADDR0, SF32LB52_LSM6DS3_I2C_BUS, ret);
+
+      ret = lsm6dsl_sensor_register(SF32LB52_LSM6DS3_DEVPATH,
+                                    i2c,
+                                    LSM6DSLACCEL_ADDR1);
+    }
+
+  if (ret < 0)
+    {
+      syslog(LOG_ERR,
+             "ERROR: LSM6DS3 register failed on I2C%d: %d\n",
+             SF32LB52_LSM6DS3_I2C_BUS, ret);
+      return ret;
+    }
+
+  syslog(LOG_INFO,
+         "INFO: LSM6DS3 test device registered as %s, INT=%d\n",
+         SF32LB52_LSM6DS3_DEVPATH, SF32LB52_LSM6DS3_INT_PIN);
+  return OK;
+}
+#endif
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
@@ -261,7 +321,7 @@ static int lcd_async_init_thread(int argc, FAR char *argv[])
 #endif
 
 /****************************************************************************
- * Name: lckfb_huangshan_pi_bringup
+ * Name: sf32lb52_lchspi_ulp_bringup
  *
  * Description:
  *   Perform architecture-specific initialization
@@ -274,7 +334,7 @@ static int lcd_async_init_thread(int argc, FAR char *argv[])
  *
  ****************************************************************************/
 
-int lckfb_huangshan_pi_bringup(void)
+int sf32lb52_lchspi_ulp_bringup(void)
 {
   int ret = OK;
   int tmpret;
@@ -439,6 +499,11 @@ int lckfb_huangshan_pi_bringup(void)
   /* Initialize I2C bus 1 for charger (AW32001). */
   struct i2c_master_s *i2c1 = NULL;
 
+#if defined(CONFIG_SENSORS_LSM6DSL)
+  HAL_PIN_Set(PAD_PA40, I2C2_SCL, PIN_PULLUP, 1);
+  HAL_PIN_Set(PAD_PA39, I2C2_SDA, PIN_PULLUP, 1);
+#endif
+
   i2c1 = sifli_i2cbus_initialize(1);
   if (i2c1 == NULL)
     {
@@ -451,6 +516,16 @@ int lckfb_huangshan_pi_bringup(void)
         {
           syslog(LOG_ERR, "ERROR: i2c_register(/dev/i2c1) failed: %d\n", ret);
         }
+
+#if defined(CONFIG_SENSORS_LSM6DSL)
+      tmpret = sf32lb52_lsm6ds3_initialize(i2c1);
+      if (tmpret < 0)
+        {
+          syslog(LOG_ERR,
+                 "ERROR: sf32lb52_lsm6ds3_initialize failed: %d\n",
+                 tmpret);
+        }
+#endif
     }
 #endif /* CONFIG_BSP_USING_I2C2 */
 #endif /* CONFIG_I2C */
@@ -576,7 +651,7 @@ void board_late_initialize(void)
 {
   /* Perform board-specific initialization */
 
-  lckfb_huangshan_pi_bringup();
+  sf32lb52_lchspi_ulp_bringup();
 }
 #endif
 
@@ -614,7 +689,7 @@ int board_app_initialize(uintptr_t arg)
 #else
   /* Perform board-specific initialization */
 
-  return lckfb_huangshan_pi_bringup();
+  return sf32lb52_lchspi_ulp_bringup();
 #endif
 }
 
