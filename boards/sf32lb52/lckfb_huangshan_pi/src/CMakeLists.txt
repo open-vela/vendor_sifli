@@ -20,6 +20,14 @@
 
 set(SRCS sifli_ap.c sifli_gpio.c sf32lb52_buttons.c bsp_init.c bsp_lcd_tp.c bsp_pinmux.c bsp_power.c )
 
+# Collect all HAP app and font files for romfs
+file(GLOB_RECURSE _HAP_ABS ${CMAKE_CURRENT_LIST_DIR}/etc/data/app/* ${CMAKE_CURRENT_LIST_DIR}/etc/data/font/*)
+set(HAP_FILES)
+foreach(_f ${_HAP_ABS})
+  file(RELATIVE_PATH _rel ${CMAKE_CURRENT_LIST_DIR} ${_f})
+  list(APPEND HAP_FILES ${_rel})
+endforeach()
+
 nuttx_add_romfs(
   NAME
   etc
@@ -31,6 +39,7 @@ nuttx_add_romfs(
   RCRAWS
   etc/group
   etc/1.txt
+  ${HAP_FILES}
   PATH
   ${CMAKE_CURRENT_LIST_DIR}/etc)
 
