@@ -1,0 +1,37 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config SIFLI_AUDCODEC
+	bool "SiFli SF32LB52 on-chip audio codec (DAC playback)"
+	default n
+	---help---
+		Minimal driver for the SF32LB52 on-chip AUDCODEC DAC path
+		(speaker output), including DMA playback.
+
+		Clock parameters follow the official SF32LB52X table: clk_div is
+		always 1 on 52x and sinc_gain is 0x14D for a 3.3V AVDD.
+
+if SIFLI_AUDCODEC
+
+config SIFLI_AUDCODEC_PA_PIN
+	int "Audio PA enable GPIO pin (GPIO1/PA bank)"
+	default 10
+	---help---
+		PA10 = AUDIO_PA_CTRL on sf32lb52_devkit_lcd (NS4150B amplifier,
+		active high).
+
+		NOTE: on sf32lb52_lchspi_ulp and lckfb_huangshan_pi PA10 is
+		I2C2_SCL, so this must be adjusted for those boards.
+
+config SIFLI_AUDCODEC_TESTAPPS
+	bool "Build audtest / wavplay test applications"
+	default y
+	---help---
+		audtest  - staged tone tests (square / sine / DMA / sweep)
+		wavplay  - play a 16-bit PCM .wav file
+
+		Enabling this also embeds a small test .wav into the board romfs.
+
+endif

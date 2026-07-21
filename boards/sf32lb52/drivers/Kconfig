@@ -6,4 +6,5 @@
 menu "SiFli On-Board Device Drivers"
 source "$BINDIR/drivers/platform/lcd/Kconfig"
 source "$BINDIR/drivers/platform/input/Kconfig"
+source "$BINDIR/drivers/platform/audio/Kconfig"
 endmenu # SiFli On-Board Device Drivers

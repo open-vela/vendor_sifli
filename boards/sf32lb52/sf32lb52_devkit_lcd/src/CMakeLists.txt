@@ -43,6 +43,7 @@ target_compile_definitions(board PRIVATE SOC_BF0_HCPU
                                          HAL_TICK_PER_SECOND=1000
                                          USE_HAL_DRIVER)
 
+target_include_directories(board PRIVATE ${NUTTX_BOARD_ABS_DIR}/../drivers/audio)
 target_include_directories(board PRIVATE ${NUTTX_CHIP_ABS_DIR}/include)
 target_include_directories(board PRIVATE ${NUTTX_CHIP_ABS_DIR}/../drivers/Include)
 target_include_directories(board PRIVATE ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/Include)
@@ -64,4 +65,32 @@ if(CONFIG_CRYPTO)
     100
     SRCS
     md5_test.c)
+endif()
+
+if(CONFIG_SIFLI_AUDCODEC_TESTAPPS)
+  # Play a .wav file: parse the header, then play over DMA
+  nuttx_add_application(
+    NAME
+    wavplay
+    STACKSIZE
+    4096
+    PRIORITY
+    100
+    SRCS
+    wavplay_main.c
+    INCLUDE_DIRECTORIES
+    ${NUTTX_BOARD_ABS_DIR}/../drivers/audio)
+
+  # Staged speaker bring-up tests for the on-chip AUDCODEC DAC
+  nuttx_add_application(
+    NAME
+    audtest
+    STACKSIZE
+    4096
+    PRIORITY
+    100
+    SRCS
+    audtest_main.c
+    INCLUDE_DIRECTORIES
+    ${NUTTX_BOARD_ABS_DIR}/../drivers/audio)
 endif()
