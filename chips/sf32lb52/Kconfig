@@ -34,6 +34,15 @@ config ARCH_CHIP_SF32LB52
 
 endchoice
 
+config SF32LB52_PSRAM_TEXT_TEST
+	bool "Experimental: execute LVGL software draw code from PSRAM"
+	default n
+	depends on ARCH_CHIP_SF32LB52
+	help
+		Relocate the LVGL software draw-unit text and read-only literals to
+		PSRAM after early PSRAM initialization.  This is a diagnostic A/B
+		only; it is disabled by default and is not a production boot mode.
+
 menu "On-chip Peripheral RTOS Drivers"
 
     menuconfig BSP_USING_GPIO

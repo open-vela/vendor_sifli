@@ -18,7 +18,30 @@
 #
 # ##############################################################################
 
-set(SRCS sifli_ap.c sifli_gpio.c sf32lb52_buttons.c bsp_init.c bsp_lcd_tp.c bsp_pinmux.c bsp_power.c )
+set(SRCS sifli_ap.c sifli_gpio.c sf32lb52_buttons.c bsp_init.c bsp_lcd_tp.c bsp_pinmux.c bsp_power.c)
+
+if(CONFIG_LV_USE_NUTTX_CUSTOM_INIT)
+  list(APPEND SRCS ../../drivers/lcd/lv_lcd.c)
+
+endif()
+
+set(LVGL_BENCHMARK_ASSET_SOURCE_DIR
+    ${NUTTX_DIR}/../apps/graphics/lvgl/lvgl/demos/benchmark/assets)
+set(LVGL_BENCHMARK_ASSET_STAGE_DIR
+    ${CMAKE_CURRENT_BINARY_DIR}/benchmark_assets/etc/lvgl/demos/benchmark/assets)
+set(LVGL_BENCHMARK_ROMFS_FILES)
+
+file(MAKE_DIRECTORY ${LVGL_BENCHMARK_ASSET_STAGE_DIR})
+foreach(asset bin_demo.bin bin_demo_I8.bin bin_demo_A8.bin)
+  if(NOT EXISTS ${LVGL_BENCHMARK_ASSET_SOURCE_DIR}/${asset})
+    message(FATAL_ERROR "Missing LVGL benchmark asset: ${asset}")
+  endif()
+
+  configure_file(${LVGL_BENCHMARK_ASSET_SOURCE_DIR}/${asset}
+                 ${LVGL_BENCHMARK_ASSET_STAGE_DIR}/${asset} COPYONLY)
+  list(APPEND LVGL_BENCHMARK_ROMFS_FILES
+       ${LVGL_BENCHMARK_ASSET_STAGE_DIR}/${asset})
+endforeach()
 
 nuttx_add_romfs(
   NAME
@@ -31,8 +54,9 @@ nuttx_add_romfs(
   RCRAWS
   etc/group
   etc/1.txt
+  ${LVGL_BENCHMARK_ROMFS_FILES}
   PATH
-  ${CMAKE_CURRENT_LIST_DIR}/etc)
+  ${CMAKE_CURRENT_BINARY_DIR}/etc)
 
 target_link_libraries(board PRIVATE romfs_etc)
 

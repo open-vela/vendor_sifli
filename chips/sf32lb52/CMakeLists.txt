@@ -20,7 +20,7 @@
 
 set(SRCS sifli_start.c sifli_irq.c sifli_uart.c sifli_lowput.c
          sifli_oneshot.c sifli_allocateheap.c sifli_gpio.c sifli_i2c.c
-         sifli_spi.c)
+         sifli_spi.c sf32lb52_epic.c)
 
 if(CONFIG_ADC)
     list(APPEND SRCS sf32lb_adc.c)
@@ -82,21 +82,23 @@ set(SYSTEM_SRCS ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/sf32lb52x/Templates/syste
                 ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/sf32lb52x/bf0_pin_const.c
                 ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/sf32lb52x/lcpu_config_type.c)
 
+add_library(sifli_hal INTERFACE)
+target_compile_definitions(sifli_hal INTERFACE
+                           SOC_BF0_HCPU
+                           SF32LB52X
+                           HAL_TICK_PER_SECOND=1000
+                           USE_HAL_DRIVER)
+target_include_directories(sifli_hal INTERFACE
+                           ${NUTTX_CHIP_ABS_DIR}/include
+                           ${NUTTX_CHIP_ABS_DIR}/../drivers/Include
+                           ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/Include
+                           ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/sf32lb52x
+                           ${NUTTX_CHIP_ABS_DIR}/../external/CMSIS/Include
+                           ${NUTTX_CHIP_ABS_DIR}/../boards/include/config/sf32lb52x)
+
 target_sources(arch PRIVATE ${SRCS} ${HAL_SRCS} ${SYSTEM_SRCS} ${IPC_QUEUE_SRCS} ${LCPU_BT_SRCS})
-
-
-target_compile_definitions(arch PRIVATE SOC_BF0_HCPU 
-                                        SF32LB52X
-                                        HAL_TICK_PER_SECOND=1000
-                                        USE_HAL_DRIVER
-                                        USE_SERIALDRIVER)
-
-target_include_directories(arch PRIVATE ${NUTTX_CHIP_ABS_DIR}/include)
-target_include_directories(arch PRIVATE ${NUTTX_CHIP_ABS_DIR}/../drivers/Include)
-target_include_directories(arch PRIVATE ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/Include)
-target_include_directories(arch PRIVATE ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/sf32lb52x)
-target_include_directories(arch PRIVATE ${NUTTX_CHIP_ABS_DIR}/../external/CMSIS/Include)
-target_include_directories(arch PRIVATE ${NUTTX_CHIP_ABS_DIR}/../boards/include/config/sf32lb52x)
+target_link_libraries(arch PRIVATE sifli_hal)
+target_compile_definitions(arch PRIVATE USE_SERIALDRIVER)
 target_include_directories(arch PRIVATE ${NUTTX_BOARD_ABS_DIR}/include)
 target_include_directories(arch PRIVATE ${NUTTX_CHIP_ABS_DIR}/ipc_queue)
 target_include_directories(arch PRIVATE ${NUTTX_CHIP_ABS_DIR}/ipc_queue/common)

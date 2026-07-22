@@ -126,6 +126,28 @@
 #define RETURN_ERROR(hepic,ret_v) \
         do{ (hepic)->ErrorCode = __LINE__;  return ret_v; }while(0)
 
+/* Validate values before packing them into the manual-rotation registers.
+ * SF32LB52 uses 11-bit fields: the size fields are unsigned while pivot and
+ * source-origin fields are signed.
+ */
+
+#define IS_WITHIN_UNSIGNED_REG_RANGE(v, reg_bits_name) \
+    ((v) >= 0 && \
+     (v) <= ((reg_bits_name##_Msk) >> (reg_bits_name##_Pos)))
+
+#define IS_WITHIN_SIGNED_REG_RANGE(v, reg_bits_name) \
+    ((v) >= (int32_t)(0 - (((reg_bits_name##_Msk) >> \
+                            (reg_bits_name##_Pos)) >> 1)) && \
+     (v) <= (int32_t)(((reg_bits_name##_Msk) >> \
+                       (reg_bits_name##_Pos)) >> 1))
+
+#if defined(SF32LB55X) || defined(SF32LB58X) || \
+    defined(SF32LB52X) || defined(SF32LB56X)
+#  define EPIC_PIVOT_SRC_MAX 1023
+#else
+#  define EPIC_PIVOT_SRC_MAX 8191
+#endif
+
 
 
 
@@ -173,6 +195,13 @@ typedef struct
     EPIC_PointTypeDef pivot;
     uint16_t rotated_width;
     uint16_t rotated_height;
+    EPIC_AreaTypeDef rotated_visible_area; /**< Relative to original buf's TL*/
+
+    int16_t angle;             /* 0.1 degree */
+    float sinma_f;
+    float cosma_f;
+    float scale_x_f;
+    float scale_y_f;
 
     /*Mirror*/
     int8_t h_mirror;
@@ -219,6 +248,13 @@ static HAL_StatusTypeDef EPIC_ConfigFilling(EPIC_HandleTypeDef *epic, EPIC_Filli
 static HAL_StatusTypeDef EPIC_ConfigGrad(EPIC_HandleTypeDef *epic, EPIC_GradCfgTypeDef *param);
 void EPIC_GetRotatedArea(EPIC_AreaTypeDef *output, uint16_t w, uint16_t h, int16_t angle,
                          const EPIC_PointTypeDef *pivot);
+static void EPIC_TransformVideoLayer_ReplacePivot(
+    EPIC_BlendingDataType *fg, EPIC_TransformCfgTypeDef *rot_cfg,
+    EPIC_TransformResultDef *trans_result);
+static void EPIC_GetRotatedArea_Inner(
+    EPIC_AreaTypeDef *output, uint16_t w, uint16_t h, int16_t angle,
+    const EPIC_PointTypeDef *pivot, uint8_t scale_none,
+    const EPIC_TransformResultDef *trans_result);
 
 /** Return with sinus of an angle
  *
@@ -760,6 +796,11 @@ static bool EPIC_ClipLayerSrcByOutput(
     EPIC_DEBUG_PRINT_LAYER_INFO(input_layer, "input");
     EPIC_DEBUG_PRINT_LAYER_INFO(output_layer, "output");
 
+    if (rot_cfg)
+    {
+        EPIC_TransformVideoLayer_ReplacePivot(input_layer, rot_cfg,
+                                              trans_result);
+    }
 
     uint32_t color_depth;
     uint32_t x_round_v, y_round_v; //Clip pixel align value
@@ -858,24 +899,46 @@ static bool EPIC_ClipLayerSrcByOutput(
 
             EPIC_DEBUG_PRINT_AREA_INFO(&output_layer_area, "output_layer_area before scale(base on pivot)");
 
-            ext_x = 0;
-            ext_y = 0;
         }
+        else
+        {
+            /* Keep the interpolation halo even without scaling.  Dropping
+             * fractional-edge pixels here creates black lines after rotation.
+             */
+
+            output_layer_area.x0 -= ext_x;
+            output_layer_area.x1 += ext_x;
+            output_layer_area.y0 -= ext_y;
+            output_layer_area.y1 += ext_y;
+        }
+
+        ext_x = 0;
+        ext_y = 0;
+
+        /* Preserve the visible part before inverse rotation.  The transform
+         * stage uses this to avoid expanding the video layer to the complete
+         * source rectangle when only a clipped portion reaches the output.
+         */
+
+        trans_result->rotated_visible_area = output_layer_area;
 
         if (0 != rot_cfg->angle)
         {
             EPIC_PointTypeDef pivot_o;
 
-            //Calculate pivot base on output_layer(output_layer is base on pivot now)
+            /* EPIC_GetRotatedArea_Inner needs a pivot relative to TL. */
+
             pivot_o.x = 0 - output_layer_area.x0;
             pivot_o.y = 0 - output_layer_area.y0;
 
-            EPIC_GetRotatedArea(&output_layer_area,
-                                output_layer_area.x1 - output_layer_area.x0 + 1,
-                                output_layer_area.y1 - output_layer_area.y0 + 1,
-                                3600 - rot_cfg->angle, &pivot_o);
+            EPIC_GetRotatedArea_Inner(
+                &output_layer_area,
+                output_layer_area.x1 - output_layer_area.x0 + 1,
+                output_layer_area.y1 - output_layer_area.y0 + 1,
+                3600 - rot_cfg->angle, &pivot_o, 1, trans_result);
 
-            //'EPIC_GetRotatedArea' return area is base on output_layer's TL move to pivot
+            /* The returned area is based on output TL moved to the pivot. */
+
             AreaMove(&output_layer_area, -pivot_o.x, -pivot_o.y);
             EPIC_DEBUG_PRINT_AREA_INFO(&output_layer_area, "output_layer_area before rotate(base on pivot)");
         }
@@ -979,62 +1042,6 @@ static bool EPIC_ClipLayerSrcByOutput(
     return true;
 }
 
-
-/**
- * @brief Get area of VL which will be mirror and visible on canvas, and it is coordinate is base on video layer's TL
- * @param vl -
- * @param canvas -
- * @param pivot -  same origin with VL and CANVAS
- * @param vl_new_area -
- * @return
- */
-static void EPIC_GetMirrorArea(EPIC_BlendingDataType *vl, const EPIC_BlendingDataType *canvas, const EPIC_PointTypeDef *pivot, EPIC_AreaTypeDef *vl_new_area)
-{
-    bool has_intersect;
-    EPIC_AreaTypeDef  intersrc_area;
-
-    EPIC_DEBUG_PRINT_LAYER_INFO(vl, "Fg layer");
-    EPIC_DEBUG_PRINT_LAYER_INFO(canvas, "canvas layer");
-
-    //Mirror video layer
-    vl->x_offset = EPIC_MIRROR_V(vl->x_offset + vl->width - 1, pivot->x);
-
-    EPIC_DEBUG_PRINT_LAYER_INFO(vl, "Mirrored Fg");
-
-
-    has_intersect = EPIC_CalcIntersectArea(vl, canvas, &intersrc_area);
-
-    EPIC_DEBUG_PRINT_AREA_INFO(&intersrc_area, "mirrored inter_area");
-
-    //Revert video layer
-    vl->x_offset = EPIC_MIRROR_V(vl->x_offset + vl->width - 1, pivot->x);
-    EPIC_DEBUG_PRINT_LAYER_INFO(vl, "Revert Fg");
-
-    if (has_intersect)
-    {
-        //Get area before mirrored
-        EPIC_MirrorAreaByPivot(&intersrc_area, pivot->x);
-
-        EPIC_DEBUG_PRINT_AREA_INFO(&intersrc_area, "before inter_area");
-
-        HAL_ASSERT((intersrc_area.x0 <= intersrc_area.x1) && (intersrc_area.y0 <= intersrc_area.y1));
-        HAL_ASSERT((intersrc_area.x0 >= vl->x_offset) && (intersrc_area.x0 <= vl->x_offset + vl->width - 1));
-        HAL_ASSERT((intersrc_area.x1 >= vl->x_offset) && (intersrc_area.x1 <= vl->x_offset + vl->width - 1));
-
-        vl_new_area->x0 = intersrc_area.x0 - vl->x_offset;
-        vl_new_area->x1 = intersrc_area.x1 - vl->x_offset;
-        vl_new_area->y0 = intersrc_area.y0 - vl->y_offset;
-        vl_new_area->y1 = intersrc_area.y1 - vl->y_offset;
-
-        EPIC_DEBUG_PRINT_AREA_INFO(vl_new_area, "VL inner inter_area");
-
-    }
-    else
-    {
-        memset(vl_new_area, 0, sizeof(EPIC_AreaTypeDef));
-    }
-}
-
 /** Calculate area after rotation, area coordinate is relative to original topleft pixel(and pivot too)
  *  i.e. if angle=0, output is x0=0, y0=0, x1=w-1, y1=h-1
  *
@@ -1099,6 +1106,198 @@ void EPIC_GetRotatedArea(EPIC_AreaTypeDef *output, uint16_t w, uint16_t h, int16
     output->x1 = EPIC_MATH_MAX4(lb.x, lt.x, rb.x, rt.x) + 1;
     output->y0 = EPIC_MATH_MIN4(lb.y, lt.y, rb.y, rt.y) - 1;
     output->y1 = EPIC_MATH_MAX4(lb.y, lt.y, rb.y, rt.y) + 1;
+}
+
+/* Variant used by the clipping/transform pipeline.  The sine, cosine and
+ * inverse scale values were calculated when the pivot was normalized, so the
+ * forward and inverse area calculations use the same fractional geometry.
+ */
+
+static void EPIC_GetRotatedArea_Inner(
+    EPIC_AreaTypeDef *output, uint16_t w, uint16_t h, int16_t angle,
+    const EPIC_PointTypeDef *pivot, uint8_t scale_none,
+    const EPIC_TransformResultDef *trans_result)
+{
+    float sinma_f;
+    float cosma_f;
+    float scale_x_f = scale_none ? 1.0f : trans_result->scale_x_f;
+    float scale_y_f = scale_none ? 1.0f : trans_result->scale_y_f;
+    EPIC_PointTypeDef lt;
+    EPIC_PointTypeDef rt;
+    EPIC_PointTypeDef lb;
+    EPIC_PointTypeDef rb;
+    EPIC_AreaTypeDef area;
+
+    if (angle == trans_result->angle)
+    {
+        sinma_f = trans_result->sinma_f;
+        cosma_f = trans_result->cosma_f;
+    }
+    else if ((3600 - angle) == trans_result->angle)
+    {
+        sinma_f = 0.0f - trans_result->sinma_f;
+        cosma_f = trans_result->cosma_f;
+    }
+    else
+    {
+        HAL_ASSERT(0); /* Mismatched angle. */
+        sinma_f = 0.0f;
+        cosma_f = 1.0f;
+    }
+
+    area.x0 = -pivot->x;
+    area.y0 = -pivot->y;
+    area.x1 = w - pivot->x;
+    area.y1 = h - pivot->y;
+
+#define EPIC_TRANSFORM_POINT(out_x, out_y, in_x, in_y) \
+    do \
+    { \
+        (out_x) = ((cosma_f * (in_x) - sinma_f * (in_y)) * \
+                   scale_x_f) + pivot->x; \
+        (out_y) = ((sinma_f * (in_x) + cosma_f * (in_y)) * \
+                   scale_y_f) + pivot->y; \
+    } while (0)
+
+    EPIC_TRANSFORM_POINT(lt.x, lt.y, area.x0, area.y0);
+    EPIC_TRANSFORM_POINT(rt.x, rt.y, area.x1, area.y0);
+    EPIC_TRANSFORM_POINT(lb.x, lb.y, area.x0, area.y1);
+    EPIC_TRANSFORM_POINT(rb.x, rb.y, area.x1, area.y1);
+
+#undef EPIC_TRANSFORM_POINT
+
+    output->x0 = EPIC_MATH_MIN4(lb.x, lt.x, rb.x, rt.x) - 1;
+    output->x1 = EPIC_MATH_MAX4(lb.x, lt.x, rb.x, rt.x) + 1;
+    output->y0 = EPIC_MATH_MIN4(lb.y, lt.y, rb.y, rt.y) - 1;
+    output->y1 = EPIC_MATH_MAX4(lb.y, lt.y, rb.y, rt.y) + 1;
+}
+
+/* The SF32LB52 manual-rotation registers have a limited signed pivot range.
+ * Re-express an arbitrary caller pivot as the source-layer center and move the
+ * layer by the equivalent fractional offset.  This preserves the visual
+ * transform while keeping the later register geometry representable.
+ */
+
+static void EPIC_TransformVideoLayer_ReplacePivot(
+    EPIC_BlendingDataType *fg, EPIC_TransformCfgTypeDef *rot_cfg,
+    EPIC_TransformResultDef *trans_result)
+{
+    EPIC_PointTypeDef new_pivot;
+    int32_t sinma;
+    int32_t cosma;
+    float sinma_f;
+    float cosma_f;
+    float scale_x_f;
+    float scale_y_f;
+
+    if (!IS_NEED_TRANSFROM(rot_cfg))
+    {
+        return;
+    }
+
+    new_pivot.x = fg->width / 2;
+    new_pivot.y = fg->height / 2;
+
+    while (rot_cfg->angle < 0)
+    {
+        rot_cfg->angle += 3600;
+    }
+
+    while (rot_cfg->angle >= 3600)
+    {
+        rot_cfg->angle -= 3600;
+    }
+
+    if (rot_cfg->angle == 0)
+    {
+        sinma = 0;
+        cosma = 1 << EPIC_TRIGO_SHIFT;
+        sinma_f = 0.0f;
+        cosma_f = 1.0f;
+    }
+    else
+    {
+        int32_t angle_low = rot_cfg->angle / 10;
+        int32_t angle_high = angle_low + 1;
+        int32_t angle_rem = rot_cfg->angle - angle_low * 10;
+        int32_t s1 = EPIC_TrigoSin(angle_low);
+        int32_t s2 = EPIC_TrigoSin(angle_high);
+        int32_t c1 = EPIC_TrigoSin(angle_low + 90);
+        int32_t c2 = EPIC_TrigoSin(angle_high + 90);
+
+        sinma = (s1 * (10 - angle_rem) + s2 * angle_rem) / 10;
+        cosma = (c1 * (10 - angle_rem) + c2 * angle_rem) / 10;
+        sinma_f = (float)sinma / (float)(1 << EPIC_TRIGO_SHIFT);
+        cosma_f = (float)cosma / (float)(1 << EPIC_TRIGO_SHIFT);
+    }
+
+    scale_x_f = (float)EPIC_INPUT_SCALING_FACTOR_1 /
+                (float)rot_cfg->scale_x;
+    scale_y_f = (float)EPIC_INPUT_SCALING_FACTOR_1 /
+                (float)rot_cfg->scale_y;
+
+    trans_result->angle = rot_cfg->angle;
+    trans_result->sinma_f = sinma_f;
+    trans_result->cosma_f = cosma_f;
+    trans_result->scale_x_f = scale_x_f;
+    trans_result->scale_y_f = scale_y_f;
+    trans_result->abs_sinma = EPIC_MATH_ABS(sinma);
+    trans_result->abs_cosma = EPIC_MATH_ABS(cosma);
+
+#ifndef SF32LB55X
+    {
+        float pivot_delta_x = (float)(new_pivot.x - rot_cfg->pivot_x);
+        float pivot_delta_y = (float)(new_pivot.y - rot_cfg->pivot_y);
+        float transformed_pivot_x;
+        float transformed_pivot_y;
+        float previous_x;
+        float previous_y;
+        int32_t now_x;
+        int32_t now_y;
+
+        transformed_pivot_x =
+            (cosma_f * pivot_delta_x - sinma_f * pivot_delta_y) *
+            scale_x_f;
+        transformed_pivot_y =
+            (sinma_f * pivot_delta_x + cosma_f * pivot_delta_y) *
+            scale_y_f;
+
+        if (rot_cfg->h_mirror)
+        {
+            transformed_pivot_x = -transformed_pivot_x;
+        }
+
+        if (rot_cfg->v_mirror)
+        {
+            transformed_pivot_y = -transformed_pivot_y;
+        }
+
+        previous_x = (float)EPIC_TO_INT32_COORD(fg->x_offset,
+                                                fg->x_offset_frac) /
+                     65536.0f;
+        previous_y = (float)EPIC_TO_INT32_COORD(fg->y_offset,
+                                                fg->y_offset_frac) /
+                     65536.0f;
+
+        now_x = (int32_t)((previous_x + transformed_pivot_x -
+                           pivot_delta_x) * 65536.0f);
+        now_y = (int32_t)((previous_y + transformed_pivot_y -
+                           pivot_delta_y) * 65536.0f);
+
+        fg->x_offset = EPIC_INT32_COORD_GET_INT16(now_x);
+        fg->y_offset = EPIC_INT32_COORD_GET_INT16(now_y);
+        fg->x_offset_frac = EPIC_INT32_COORD_GET_FRAC16(now_x);
+        fg->y_offset_frac = EPIC_INT32_COORD_GET_FRAC16(now_y);
+
+        rot_cfg->pivot_x = new_pivot.x;
+        rot_cfg->pivot_y = new_pivot.y;
+
+        EPIC_PRINTF("fg xy offset=[%.3f, %.3f], pivot=[%d,%d]\n",
+                    transformed_pivot_x - pivot_delta_x,
+                    transformed_pivot_y - pivot_delta_y,
+                    rot_cfg->pivot_x, rot_cfg->pivot_y);
+    }
+#endif
 }
 
 /**
@@ -1673,6 +1872,21 @@ static HAL_StatusTypeDef EPIC_DisableVideoLayer(EPIC_TypeDef *epic)
     return HAL_OK;
 }
 
+static inline void EPIC_DisableOutputLayer(EPIC_TypeDef *epic)
+{
+    epic->CANVAS_BG = 0;
+
+#ifdef EPIC_SUPPORT_DITHER
+#ifdef EPIC_DITHER_CONF_FSD_EN
+    epic->DITHER_CONF &= ~EPIC_DITHER_CONF_FSD_EN;
+#elif defined(EPIC_DITHER_CONF_RD_EN)
+    epic->DITHER_CONF &= ~EPIC_DITHER_CONF_RD_EN;
+#else
+    epic->DITHER_CONF &= ~EPIC_DITHER_CONF_EN;
+#endif /* EPIC_DITHER_CONF_FSD_EN */
+#endif /* EPIC_SUPPORT_DITHER */
+}
+
 
 /**
  * @brief  Configure output layer
@@ -2131,13 +2345,15 @@ static HAL_StatusTypeDef EPIC_TransformVideoLayer(EPIC_TypeDef *epic,
     uint16_t new_width;
     uint16_t new_height;
 
-    uint32_t color_depth;
     int16_t angle_degree;
 
 
     uint32_t epic_scale_x;       //EPIC scale value
     uint32_t epic_scale_y;       //EPIC scale value
     EPIC_PointTypeDef pivot;                //Pivot base on VideoLayer's origin(or base on submodule's origin)
+    int32_t original_abs_pivot_x =
+        EPIC_TO_INT32_COORD(fg->x_offset + rot_cfg->pivot_x,
+                            fg->x_offset_frac);
 
     EPIC_VideoLayerxTypeDef *Vlayer_x;
     EPIC_VideoLayerxTransTypeDef *Vlayer_x_trans;
@@ -2179,29 +2395,10 @@ static HAL_StatusTypeDef EPIC_TransformVideoLayer(EPIC_TypeDef *epic,
         angle_degree += 1;
     }
 
-    if (0 != rot_cfg->angle)
-    {
-        int16_t sinma;
-        int16_t cosma;
-        int16_t abs_sinma;
-        int16_t abs_cosma;
-
-        /* set rotation angle */
-        EPIC_TrigoSinCosP1(rot_cfg->angle, &sinma, &cosma);
-
-        abs_sinma = EPIC_MATH_ABS(sinma);
-        abs_cosma = EPIC_MATH_ABS(cosma);
-
-        trans_result->abs_sinma       = abs_sinma;
-        trans_result->abs_cosma       = abs_cosma;
-    }
-
     trans_result->angle_degree = angle_degree;
     trans_result->h_mirror = rot_cfg->h_mirror;
     trans_result->v_mirror = rot_cfg->v_mirror;
 
-
-    color_depth = EPIC_GetColorDepth(fg->color_mode);
 
     /******************************************************************************/
     new_offset_x = fg->x_offset;
@@ -2239,78 +2436,163 @@ static HAL_StatusTypeDef EPIC_TransformVideoLayer(EPIC_TypeDef *epic,
 
         if (rot_cfg->angle != 0)
         {
-            int32_t delta_x;
-            int32_t delta_y;
+            /* Vectors used to move the visible rotated area while keeping
+             * pivot and source-origin values representable by the 11-bit
+             * signed hardware fields.
+             */
 
-            EPIC_GetRotatedArea(&rot_area, fg->width, fg->height, rot_cfg->angle, &pivot);
+            EPIC_PointTypeDef d1;
+            EPIC_PointTypeDef d2;
+            EPIC_PointTypeDef d3;
+            EPIC_PointTypeDef df;
 
+            EPIC_GetRotatedArea_Inner(&rot_area, fg->width, fg->height,
+                                      rot_cfg->angle, &pivot, 1,
+                                      trans_result);
+            EPIC_DEBUG_PRINT_AREA_INFO(&rot_area, "rot_area");
 
-#ifdef SF32LB55X //pivot are not support negative
-            /*Make sure rotated image is all visible(NOT be clipped by VideoLayer submodule)*/
-            delta_x = EPIC_MATH_MIN(pivot.x, rot_area.x0);
-            delta_y = EPIC_MATH_MIN(pivot.y, rot_area.y0);
-#else
-            delta_x = rot_area.x0;
-            delta_y = rot_area.y0;
-#endif /* SF32LB55X */
+            AreaMove(&trans_result->rotated_visible_area,
+                     rot_cfg->pivot_x, rot_cfg->pivot_y);
+            EPIC_DEBUG_PRINT_AREA_INFO(&trans_result->rotated_visible_area,
+                                       "rotated_visible_area");
 
-            if (delta_x < 0)
-                delta_x = -delta_x;
+            HAL_EPIC_AreaIntersect(&rot_area, &rot_area,
+                                   &trans_result->rotated_visible_area);
+            EPIC_DEBUG_PRINT_AREA_INFO(&rot_area,
+                                       "rot_area&rotated_visible_area");
+
+            if (rot_area.x0 > rot_area.x1)
+            {
+                fg->width = 0;
+                goto __EXIT;
+            }
+
+            if (rot_area.y0 > rot_area.y1)
+            {
+                fg->height = 0;
+                goto __EXIT;
+            }
+
+            d1.x = -rot_area.x0;
+            d1.y = -rot_area.y0;
+
+            if (pivot.x + d1.x > EPIC_PIVOT_SRC_MAX)
+            {
+                HAL_ASSERT(0);
+                return HAL_ERROR;
+            }
+#ifdef SF32LB55X
+            else if (pivot.x + d1.x < 0)
+            {
+                d2.x = -(pivot.x + d1.x);
+            }
+#endif
+            else if (pivot.x + d1.x < -EPIC_PIVOT_SRC_MAX)
+            {
+                d2.x = -EPIC_PIVOT_SRC_MAX - (pivot.x + d1.x);
+            }
             else
-                delta_x = 0;
+            {
+                d2.x = 0;
+            }
 
-            if (delta_y < 0)
-                delta_y = -delta_y;
+            if (pivot.y + d1.y > EPIC_PIVOT_SRC_MAX)
+            {
+                HAL_ASSERT(0);
+                return HAL_ERROR;
+            }
+#ifdef SF32LB55X
+            else if (pivot.y + d1.y < 0)
+            {
+                d2.y = -(pivot.y + d1.y);
+            }
+#endif
+            else if (pivot.y + d1.y < -EPIC_PIVOT_SRC_MAX)
+            {
+                d2.y = -EPIC_PIVOT_SRC_MAX - (pivot.y + d1.y);
+            }
             else
-                delta_y = 0;
+            {
+                d2.y = 0;
+            }
 
-            pivot.x     += delta_x;
-            pivot.y     += delta_y;
-            src_img.x   += delta_x;
-            src_img.y   += delta_y;
-            AreaMove(&rot_area, delta_x, delta_y);
+            if (src_img.x + d1.x + d2.x > EPIC_PIVOT_SRC_MAX)
+            {
+                HAL_ASSERT(0);
+                return HAL_ERROR;
+            }
+            else if (src_img.x + d1.x + d2.x < -EPIC_PIVOT_SRC_MAX)
+            {
+                d3.x = -EPIC_PIVOT_SRC_MAX -
+                       (src_img.x + d1.x + d2.x);
+            }
+            else
+            {
+                d3.x = 0;
+            }
 
+            if (src_img.y + d1.y + d2.y > EPIC_PIVOT_SRC_MAX)
+            {
+                HAL_ASSERT(0);
+                return HAL_ERROR;
+            }
+            else if (src_img.y + d1.y + d2.y < -EPIC_PIVOT_SRC_MAX)
+            {
+                d3.y = -EPIC_PIVOT_SRC_MAX -
+                       (src_img.y + d1.y + d2.y);
+            }
+            else
+            {
+                d3.y = 0;
+            }
 
-            //rotated_width  = rot_area.x1 - rot_area.x0 + 1;
-            //rotated_height = rot_area.y1 - rot_area.y0 + 1;
-            rotated_width  = EPIC_MATH_MAX(rot_area.x1, src_img.x + fg->width - 1)  - EPIC_MATH_MIN(rot_area.x0, 0);
-            rotated_height = EPIC_MATH_MAX(rot_area.y1, src_img.y + fg->height - 1)  - EPIC_MATH_MIN(rot_area.y0, 0);
+            /* Enlarge the calculation area only as needed to make the
+             * register coordinates legal.  The visible VL area remains the
+             * intersection computed above.
+             */
 
+            if (d2.x + d3.x >= 0)
+            {
+                rot_area.x1 += d2.x + d3.x;
+            }
 
-            EPIC_PRINTF("delta_x&y[%d,%d]\n", delta_x, delta_y);
+            if (d2.y + d3.y >= 0)
+            {
+                rot_area.y1 += d2.y + d3.y;
+            }
 
-            EPIC_PRINTF("rotate_pivot[%d,%d],  rot_area[(%d,%d),(%d,%d)]\n",
-                        pivot.x, pivot.y,
-                        rot_area.x0,
-                        rot_area.y0,
-                        rot_area.x1,
-                        rot_area.y1
-                       );
+            rotated_width = rot_area.x1 - rot_area.x0 + 1;
+            rotated_height = rot_area.y1 - rot_area.y0 + 1;
 
-            EPIC_PRINTF("src_img[%d,%d],  rotate_pivot(%d,%d), w:%d, h:%d\n",
-                        src_img.x,
-                        src_img.y,
-                        pivot.x,
-                        pivot.y,
-                        rotated_width,
-                        rotated_height
-                       );
+            df.x = d1.x + d2.x + d3.x;
+            df.y = d1.y + d2.y + d3.y;
 
-            trans_result->rotated_width  = rotated_width;
-            trans_result->rotated_height = rotated_height;
-            trans_result->pivot.x = pivot.x;
-            trans_result->pivot.y = pivot.y;
-            trans_result->src_img.x = src_img.x;
-            trans_result->src_img.y = src_img.y;
+            new_offset_x -= df.x;
+            new_offset_y -= df.y;
+            new_width = rotated_width - 1;
+            new_height = rotated_height - 1;
 
-            /*
-                Clip VideoLayer submodule image by moving videolayer's TL&BR
-            */
+            pivot.x += df.x;
+            pivot.y += df.y;
+            src_img.x += df.x;
+            src_img.y += df.y;
+            AreaMove(&rot_area, df.x, df.y);
 
-            new_offset_x -= delta_x;
-            new_offset_y -= delta_y;
-            new_width    = rotated_width - 1;
-            new_height   = rotated_height - 1;
+            /* ROT_M_CFG1 stores the maximum coordinate (span), not the
+             * number of pixels.  Its calculation area must cover both the
+             * rotated result and the original source image.
+             */
+
+            trans_result->rotated_width =
+                EPIC_MATH_MAX(rot_area.x1,
+                              src_img.x + fg->width - 1) -
+                EPIC_MATH_MIN(rot_area.x0, src_img.x);
+            trans_result->rotated_height =
+                EPIC_MATH_MAX(rot_area.y1,
+                              src_img.y + fg->height - 1) -
+                EPIC_MATH_MIN(rot_area.y0, src_img.y);
+            trans_result->pivot = pivot;
+            trans_result->src_img = src_img;
         }
         else
         {
@@ -2434,18 +2716,14 @@ static HAL_StatusTypeDef EPIC_TransformVideoLayer(EPIC_TypeDef *epic,
 
 
     //Hardware: mirror the intersection area of VL&CANVAS
-    if (rot_cfg->h_mirror) //((rot_cfg->h_mirror) && (!rot_cfg->v_mirror))
+    if (rot_cfg->h_mirror)
     {
-        //Mirror clipped video area
-        int32_t layer_x0_16p16 = (((int32_t)new_offset_x) << 16) - ((int32_t) trans_result->scale_init_x);
-        int32_t pivot_x_16p16 = ((int32_t) pivot.x) << 16;
-        int32_t layer_x1_16p16 = layer_x0_16p16 + (((int32_t) new_width) << 16);
+        int32_t layer_x1_16p16 =
+            ((int32_t)(new_offset_x + new_width)) << 16;
+        int32_t layer_x0_16p16 =
+            EPIC_MIRROR_V(layer_x1_16p16, original_abs_pivot_x);
 
-        layer_x0_16p16 = EPIC_MIRROR_V(layer_x1_16p16, layer_x0_16p16 + pivot_x_16p16);
-
-        trans_result->scale_init_x = EPIC_SCALE_1 - (layer_x0_16p16 & 0xFFFF);
         new_offset_x = (int16_t)(layer_x0_16p16 >> 16);
-        new_offset_x += (trans_result->scale_init_x != 0) ? 1 : 0;
     }
 
     if (rot_cfg->v_mirror) //((!rot_cfg->h_mirror) && (rot_cfg->v_mirror))
@@ -2465,14 +2743,36 @@ static HAL_StatusTypeDef EPIC_TransformVideoLayer(EPIC_TypeDef *epic,
     fg->height = new_height + 1;
 
 
-    if ((fg->width > (EPIC_LAYER_MAX_COORDINATE + 1))
-            || (fg->height > (EPIC_LAYER_MAX_COORDINATE + 1)))
+    if (rot_cfg->h_mirror == 0 && rot_cfg->v_mirror == 0)
     {
-        EPIC_DEBUG_PRINT_LAYER_INFO(fg, "Fg layer size Overflow");
+        EPIC_AreaTypeDef inter_area;
 
-        //Limit fg width&height in '0 ~ EPIC_LAYER_MAX_COORDINATE+1'
-        fg->width  = EPIC_MATH_MIN(fg->width,  EPIC_LAYER_MAX_COORDINATE + 1);
-        fg->height = EPIC_MATH_MIN(fg->height, EPIC_LAYER_MAX_COORDINATE + 1);
+        /* Align only the bottom/right edge to the destination.  Moving the
+         * transformed TL here would change the already-normalized pivot.
+         */
+
+        if (EPIC_CalcIntersectArea(fg, dst, &inter_area))
+        {
+            if (fg->x_offset + fg->width - 1 > inter_area.x1)
+            {
+                fg->width = inter_area.x1 - fg->x_offset + 1;
+            }
+
+            if (fg->y_offset + fg->height - 1 > inter_area.y1)
+            {
+                fg->height = inter_area.y1 - fg->y_offset + 1;
+            }
+        }
+
+        if ((fg->width > (EPIC_LAYER_MAX_COORDINATE + 1))
+                || (fg->height > (EPIC_LAYER_MAX_COORDINATE + 1)))
+        {
+            EPIC_DEBUG_PRINT_LAYER_INFO(fg, "Fg layer size Overflow");
+            fg->width = EPIC_MATH_MIN(fg->width,
+                                      EPIC_LAYER_MAX_COORDINATE + 1);
+            fg->height = EPIC_MATH_MIN(fg->height,
+                                       EPIC_LAYER_MAX_COORDINATE + 1);
+        }
     }
 
 
@@ -2664,6 +2964,20 @@ static HAL_StatusTypeDef EPIC_ConfigVideoLayer(EPIC_HandleTypeDef *epic_handle,
     else
     {
 
+        if (!IS_WITHIN_UNSIGNED_REG_RANGE(
+                trans_result->rotated_width,
+                EPIC_VL_ROT_M_CFG1_M_ROT_MAX_COL) ||
+            !IS_WITHIN_UNSIGNED_REG_RANGE(
+                trans_result->rotated_height,
+                EPIC_VL_ROT_M_CFG1_M_ROT_MAX_LINE))
+        {
+            EPIC_PRINTF("Rotated width %d, height %d overflowed\n",
+                        trans_result->rotated_width,
+                        trans_result->rotated_height);
+            HAL_ASSERT(0);
+            return HAL_ERROR;
+        }
+
         MODIFY_REG(Vlayer_x->MISC_CFG, EPIC_VL_MISC_CFG_SIN_FORCE_VALUE_Msk,
                    MAKE_REG_VAL(trans_result->abs_sinma >> (EPIC_SIN_COS_FRAC_BIT - EPIC_VL_MISC_CFG_SIN_FRAC_BIT),
                                 EPIC_VL_MISC_CFG_SIN_FORCE_VALUE_Msk,
@@ -2681,9 +2995,39 @@ static HAL_StatusTypeDef EPIC_ConfigVideoLayer(EPIC_HandleTypeDef *epic_handle,
                                      | MAKE_REG_VAL(trans_result->rotated_width, EPIC_VL_ROT_M_CFG1_M_ROT_MAX_COL_Msk, EPIC_VL_ROT_M_CFG1_M_ROT_MAX_COL_Pos)
                                      | MAKE_REG_VAL(trans_result->rotated_height, EPIC_VL_ROT_M_CFG1_M_ROT_MAX_LINE_Msk, EPIC_VL_ROT_M_CFG1_M_ROT_MAX_LINE_Pos);
 
+#if defined(SF32LB55X)
+        if (!IS_WITHIN_UNSIGNED_REG_RANGE(
+                trans_result->pivot.x, EPIC_VL_ROT_M_CFG2_M_PIVOT_X) ||
+            !IS_WITHIN_UNSIGNED_REG_RANGE(
+                trans_result->pivot.y, EPIC_VL_ROT_M_CFG2_M_PIVOT_Y))
+#else
+        if (!IS_WITHIN_SIGNED_REG_RANGE(
+                trans_result->pivot.x, EPIC_VL_ROT_M_CFG2_M_PIVOT_X) ||
+            !IS_WITHIN_SIGNED_REG_RANGE(
+                trans_result->pivot.y, EPIC_VL_ROT_M_CFG2_M_PIVOT_Y))
+#endif
+        {
+            EPIC_PRINTF("Pivot %d, %d overflowed\n",
+                        trans_result->pivot.x, trans_result->pivot.y);
+            HAL_ASSERT(0);
+            return HAL_ERROR;
+        }
+
         /* pivot coordinate is relative to video layer topleft point, for now it must be positive value  */
         Vlayer_x_trans->ROT_M_CFG2 = MAKE_REG_VAL(trans_result->pivot.x, EPIC_VL_ROT_M_CFG2_M_PIVOT_X_Msk, EPIC_VL_ROT_M_CFG2_M_PIVOT_X_Pos)
                                      | MAKE_REG_VAL(trans_result->pivot.y, EPIC_VL_ROT_M_CFG2_M_PIVOT_Y_Msk, EPIC_VL_ROT_M_CFG2_M_PIVOT_Y_Pos);
+
+        if (!IS_WITHIN_SIGNED_REG_RANGE(
+                trans_result->src_img.x, EPIC_VL_ROT_M_CFG3_M_XTL) ||
+            !IS_WITHIN_SIGNED_REG_RANGE(
+                trans_result->src_img.y, EPIC_VL_ROT_M_CFG3_M_YTL))
+        {
+            EPIC_PRINTF("Src img %d, %d overflowed\n",
+                        trans_result->src_img.x,
+                        trans_result->src_img.y);
+            HAL_ASSERT(0);
+            return HAL_ERROR;
+        }
 
         /* set image position before rotation, its coordinate is relative video layer topleft point*/
         Vlayer_x_trans->ROT_M_CFG3 = MAKE_REG_VAL(trans_result->src_img.x, EPIC_VL_ROT_M_CFG3_M_XTL_Msk, EPIC_VL_ROT_M_CFG3_M_XTL_Pos)
@@ -2826,8 +3170,13 @@ static HAL_StatusTypeDef EPIC_ContConfigVideoLayer(EPIC_HandleTypeDef *epic_hand
                        | MAKE_REG_VAL(y_offset + config->height - 1, EPIC_VL_BR_POS_Y1_Msk, EPIC_VL_BR_POS_Y1_Pos);
 
 
-    Vlayer_x->EXTENTS = MAKE_REG_VAL(config->width, EPIC_VL_EXTENTS_MAX_COL_Msk, EPIC_VL_EXTENTS_MAX_COL_Pos)
-                        | MAKE_REG_VAL(config->height, EPIC_VL_EXTENTS_MAX_LINE_Msk, EPIC_VL_EXTENTS_MAX_LINE_Pos);
+    /* MAX_COL/MAX_LINE are inclusive maximum coordinates, not pixel counts.
+     * Match SDK fix 2b1c0b250 to avoid black dots on the last row/column in
+     * continuous mode.
+     */
+
+    Vlayer_x->EXTENTS = MAKE_REG_VAL(config->width - 1, EPIC_VL_EXTENTS_MAX_COL_Msk, EPIC_VL_EXTENTS_MAX_COL_Pos)
+                        | MAKE_REG_VAL(config->height - 1, EPIC_VL_EXTENTS_MAX_LINE_Msk, EPIC_VL_EXTENTS_MAX_LINE_Pos);
 
 #ifndef SF32LB55X
     Vlayer_x->SCALE_RATIO_H = MAKE_REG_VAL(EPIC_SCALE_1, EPIC_VL_SCALE_RATIO_H_XPITCH_Msk, EPIC_VL_SCALE_RATIO_H_XPITCH_Pos);
@@ -3783,7 +4132,7 @@ __EXIT:
     EPIC_DisableLayer(epic->Instance, EPIC_LAYER_IDX_1);
     EPIC_DisableVideoLayer(epic->Instance);
     EPIC_DisableMaskLayer(epic->Instance);
-    epic->Instance->CANVAS_BG = 0;
+    EPIC_DisableOutputLayer(epic->Instance);
 
     EPIC_DISABLE(epic);
 
@@ -3950,7 +4299,7 @@ __EXIT:
     EPIC_DisableLayer(epic->Instance, EPIC_LAYER_IDX_1);
     EPIC_DisableVideoLayer(epic->Instance);
     EPIC_DisableMaskLayer(epic->Instance);
-    epic->Instance->CANVAS_BG = 0;
+    EPIC_DisableOutputLayer(epic->Instance);
 
     EPIC_DISABLE(epic);
 
@@ -4018,7 +4367,7 @@ HAL_StatusTypeDef HAL_EPIC_BlendStartEx_IT(EPIC_HandleTypeDef *epic,
     if (HAL_OK != ret)
     {
         EPIC_BlendCpltCallback(epic);
-        return HAL_OK;
+        return (HAL_EPIC_NOTHING_TO_DO == ret) ? HAL_OK : ret;
     }
 
     epic->IntXferCpltCallback = EPIC_BlendCpltCallback;
@@ -4128,7 +4477,7 @@ HAL_StatusTypeDef HAL_EPIC_Rotate(EPIC_HandleTypeDef *epic, EPIC_TransformCfgTyp
     EPIC_DisableLayer(epic->Instance, EPIC_LAYER_IDX_0);
     EPIC_DisableVideoLayer(epic->Instance);
     EPIC_DisableMaskLayer(epic->Instance);
-    epic->Instance->CANVAS_BG = 0;
+    EPIC_DisableOutputLayer(epic->Instance);
 
     EPIC_DISABLE(epic);
 
@@ -4346,7 +4695,7 @@ __EXIT:
 
     /* disable video layer */
     EPIC_DisableVideoLayer(epic->Instance);
-    epic->Instance->CANVAS_BG = 0;
+    EPIC_DisableOutputLayer(epic->Instance);
 
     EPIC_DISABLE(epic);
 
@@ -4785,7 +5134,7 @@ HAL_StatusTypeDef HAL_EPIC_ContBlendStop(EPIC_HandleTypeDef *hepic)
         EPIC_DisableLayer(hepic->Instance, EPIC_LAYER_IDX_1);
         EPIC_DisableVideoLayer(hepic->Instance);
         EPIC_DisableMaskLayer(hepic->Instance);
-        hepic->Instance->CANVAS_BG = 0;
+        EPIC_DisableOutputLayer(hepic->Instance);
 
         EPIC_DISABLE(hepic);
 
@@ -4956,7 +5305,7 @@ __EXIT:
     EPIC_DisableLayer(hepic->Instance, EPIC_LAYER_IDX_1);
     EPIC_DisableVideoLayer(hepic->Instance);
     EPIC_DisableMaskLayer(hepic->Instance);
-    hepic->Instance->CANVAS_BG = 0;
+    EPIC_DisableOutputLayer(hepic->Instance);
     hepic->api_type = EPIC_API_NORMAL;
 
     EPIC_DISABLE(hepic);
@@ -5106,7 +5455,7 @@ static void EPIC_CommonCbk(EPIC_HandleTypeDef *epic)
 {
     EPIC_CpltCallback usr_cbk;
 
-    epic->Instance->CANVAS_BG = 0;
+    EPIC_DisableOutputLayer(epic->Instance);
 
     EPIC_DISABLE(epic);
 
@@ -5188,7 +5537,7 @@ static void EPIC_CopyCpltCallback(EPIC_HandleTypeDef *epic)
 #ifndef SF32LB55X
     epic->Instance->CANVAS_BG &= ~EPIC_CANVAS_BG_ALL_BLENDING_BYPASS;
 #endif
-    epic->Instance->CANVAS_BG = 0;
+    EPIC_DisableOutputLayer(epic->Instance);
 
 #ifdef HAL_EZIP_MODULE_ENABLED
     if (HAL_OK != HAL_EZIP_CheckReady(epic->hezip))
@@ -5275,7 +5624,13 @@ static HAL_StatusTypeDef EPIC_ConfigRotation(EPIC_HandleTypeDef *epic,
     EPIC_TransResultInit(&trans_result, fg);
 
     EPIC_ClipLayerSrcByOutput(fg, rot_cfg, dst, &trans_result);
-    EPIC_TransformVideoLayer(epic->Instance, EPIC_LAYER_IDX_VL, rot_cfg, fg, dst, &trans_result);
+    ret = EPIC_TransformVideoLayer(epic->Instance, EPIC_LAYER_IDX_VL,
+                                   rot_cfg, fg, dst, &trans_result);
+    if (ret != HAL_OK)
+    {
+        return ret;
+    }
+
     EPIC_MakeAllLayerCoordValid(fg, bg, dst);
 
     EPIC_TransformResultDef trans_result_bg;
@@ -5292,7 +5647,13 @@ static HAL_StatusTypeDef EPIC_ConfigRotation(EPIC_HandleTypeDef *epic,
         }
         else
         {
-            EPIC_ConfigVideoLayer(epic, EPIC_LAYER_IDX_VL, &trans_result, fg, alpha, 1);
+            ret = EPIC_ConfigVideoLayer(epic, EPIC_LAYER_IDX_VL,
+                                        &trans_result, fg, alpha, 1);
+        }
+
+        if (ret != HAL_OK)
+        {
+            return ret;
         }
     }
 
@@ -5839,7 +6200,14 @@ static HAL_StatusTypeDef EPIC_ConfigGrad(EPIC_HandleTypeDef *epic, EPIC_GradCfgT
         fg_cfg.total_width = 3;
         fg_cfg.width = 3;
 
-        grd_cfg.scale_x = (EPIC_INPUT_SCALING_FACTOR_1 * 2) / output_cfg.width;
+        /* The four colors describe the visible rectangle corners.  Pixel
+         * coordinates therefore span [0, width - 1]; dividing by width
+         * leaves the last pixel one interpolation step short of the right
+         * corner and does not match LVGL's two-stop gradient semantics.
+         */
+
+        grd_cfg.scale_x = (EPIC_INPUT_SCALING_FACTOR_1 * 2) /
+                          (output_cfg.width - 1);
 
 
         for (row = 0; row < 2; row++)
@@ -5878,7 +6246,10 @@ static HAL_StatusTypeDef EPIC_ConfigGrad(EPIC_HandleTypeDef *epic, EPIC_GradCfgT
     if (output_cfg.height >= 3)
     {
         fg_cfg.height = 3;
-        grd_cfg.scale_y = (EPIC_INPUT_SCALING_FACTOR_1 * 2) / output_cfg.height;
+        /* As above, make the last visible row land on the bottom corners. */
+
+        grd_cfg.scale_y = (EPIC_INPUT_SCALING_FACTOR_1 * 2) /
+                          (output_cfg.height - 1);
 
         for (col = 0; col < fg_cfg.width; col++)
         {

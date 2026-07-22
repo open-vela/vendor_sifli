@@ -1,4 +1,4 @@
-##################################################################l##########
+############################################################################
 # platform/lcd/Make.defs
 #
 # Licensed to the Apache Software Foundation (ASF) under one or more
@@ -19,7 +19,16 @@
 ############################################################################
 
 ifeq ($(CONFIG_LCD),y)
-    CSRCS += sf32lb_lcd.c
+    CSRCS += drv_lcd.c
+    CSRCS += drv_lcd_private.c
+ifeq ($(CONFIG_BSP_USING_LCD_FRAMEBUFFER),y)
+    CSRCS += drv_lcd_fb.c
+    CSRCS += drv_ext_dma.c
+ifeq ($(CONFIG_BSP_USING_EPIC)$(CONFIG_LV_USE_SIFLI_EPIC),yy)
+    CSRCS += drv_epic.c
+endif
+    # drv_dma.c is intentionally excluded; it is not a framebuffer copy path.
+endif
 endif
 
 ifeq ($(CONFIG_LCD_USING_ILI8688E),y)
@@ -30,9 +39,9 @@ ifeq ($(CONFIG_LCD_USING_CO5300),y)
   CSRCS += co5300.c
 endif
 
+ifeq ($(CONFIG_LCD_USING_EPD_SPI),y)
+  CSRCS += epd_spi.c
+endif
+
 DEPPATH += --dep-path lcd
 VPATH += :platform/lcd
-
-
-
-
