@@ -24,6 +24,7 @@
 // specify chip arch internal header
 // eg: arm_internal.h riscv_internal.h
 #include <nuttx/config.h>
+#include <nuttx/usb/rndis.h>
 
 #include <syslog.h>
 #include <errno.h>
@@ -70,6 +71,10 @@ extern int sf32lb_adc_init(const char *devpath);
 
 #ifdef CONFIG_CDCACM
 #  include <nuttx/usb/cdcacm.h>
+#endif
+
+#ifdef CONFIG_RNDIS
+#  include <nuttx/usb/rndis.h>
 #endif
 
 #ifdef CONFIG_MTD
@@ -578,6 +583,32 @@ int sf32lb52_lchspi_ulp_bringup(void)
     }
 #endif
 
+#if defined(CONFIG_MTD) && defined(CONFIG_FS_LITTLEFS)
+  /* Replace the volatile tmpfs on /data with a persistent littlefs over
+   * the NOR partition, so agent config / memory / skills survive reboot.
+   * First boot: NOR partition is unformatted, format then mount.
+   */
+
+  nx_umount2("/data", 0);
+
+  ret = nx_mount("/dev/config0", "/data", "littlefs", 0, NULL);
+  if (ret < 0)
+    {
+      syslog(LOG_INFO, "INFO: formatting /dev/config0 as littlefs...\n");
+      ret = nx_mount("/dev/config0", "/data", "littlefs", 0,
+                     "forceformat");
+      if (ret < 0)
+        {
+          serr("WARN: littlefs mount on /data failed: %d\n", ret);
+          nx_mount(NULL, "/data", "tmpfs", 0, NULL);
+        }
+    }
+  else
+    {
+      syslog(LOG_INFO, "INFO: littlefs mounted on /data (persistent)\n");
+    }
+#endif
+
 #ifdef CONFIG_CDCACM
   ret = cdcacm_initialize(0, NULL);
   if (ret < 0)
@@ -586,12 +617,52 @@ int sf32lb52_lchspi_ulp_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_RNDIS
+  /* RNDIS Ethernet-over-USB: the host (PC) sees a network adapter when
+   * the device is plugged in via USB. Debug console remains on CH34x. */
+  {
+    static const uint8_t rndis_mac[6] =
+      { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+
+    ret = usbdev_rndis_initialize(rndis_mac);
+    if (ret < 0)
+      {
+        syslog(LOG_ERR, "ERROR: usbdev_rndis_initialize failed: %d\n", ret);
+      }
+  }
+#endif
+
 #ifdef CONFIG_UART_BTH4
   tmpret = sf32lb52_bt_initialize();
   if (tmpret < 0 && tmpret != -EEXIST)
     {
       serr("WARN: sf32lb52_bt_initialize failed: %d\n", tmpret);
     }
+#endif
+
+#ifdef CONFIG_RNDIS
+  {
+    /* RNDIS Ethernet-over-USB: the SF32LB52 USB device port is exposed
+     * on the second Type-C connector. The controller needs explicit
+     * init (usbdev_register does not call arm_usbinitialize here), then
+     * registering the RNDIS class driver enables SOFTCONN + D+ pullup
+     * so the host enumerates us. Locally-administered MAC (bit 0x02). */
+    static const uint8_t rndis_mac[6] =
+      { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+
+    extern void arm_usbinitialize(void);
+
+    arm_usbinitialize();
+    tmpret = usbdev_rndis_initialize(rndis_mac);
+    if (tmpret < 0)
+      {
+        serr("ERROR: usbdev_rndis_initialize failed: %d\n", tmpret);
+      }
+    else
+      {
+        syslog(LOG_INFO, "RNDIS initialized (MAC 02:00:00:00:00:01)\n");
+      }
+  }
 #endif
 
   return ret;
