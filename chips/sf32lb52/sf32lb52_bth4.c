@@ -499,9 +499,20 @@ static int sf32lb52_bt_recv_cb(uint8_t *data, uint16_t len)
   priv->rxlen += len;
 
 #if SF32LB52_BT_TRACE
-  syslog(LOG_INFO,
-         "sf32lb52 bth4 recv: len=%u pending=%lu first=%02x\n",
-         len, (unsigned long)priv->rxlen, priv->rxbuf[0]);
+  {
+    char hex[64];
+    int pos = 0;
+    int n = (len > 8) ? 8 : len;
+    for (int i = 0; i < n && pos < 56; i++) {
+      pos += snprintf(&hex[pos], sizeof(hex) - pos, "%02x ",
+                      priv->rxbuf[i]);
+    }
+    syslog(LOG_INFO,
+           "sf32lb52 bth4 recv: len=%u pending=%lu %s%s\n",
+           len, (unsigned long)priv->rxlen, hex,
+           (len > 1 && priv->rxbuf[0] == 0x04 && priv->rxbuf[1] == 0x3e)
+             ? "<LE META>" : "");
+  }
 #endif
 
   ret = OK;
