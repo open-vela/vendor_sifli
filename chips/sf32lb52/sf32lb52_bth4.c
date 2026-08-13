@@ -36,7 +36,7 @@
 #include "sf32lb52_bt_adapter.h"
 
 #define SF32LB52_BT_H4_RX_BUFSIZE 2048
-#define SF32LB52_BT_TRACE         0
+#define SF32LB52_BT_TRACE         1
 
 #ifndef BT_HCI_OP_READ_SUPPORTED_COMMANDS
 #  define BT_HCI_OP_READ_SUPPORTED_COMMANDS BT_OP(BT_OGF_INFO, 0x0002)
@@ -428,7 +428,10 @@ static bool sf32lb52_bt_emulate_cmd(struct sf32lb52_bt_priv_s *priv,
 
       case BT_HCI_OP_LE_WRITE_LE_HOST_SUPP:
       case BT_HCI_OP_LE_SET_HOST_FEATURE:
-      case BT_HCI_OP_LE_SET_EVENT_MASK:
+      /* LE_SET_EVENT_MASK is forwarded to the LCPU controller: the
+       * emulated success kept the controller's LE event mask at its
+       * reset default (all masked), so LE Connection Complete (0x3E)
+       * was never reported and phone GATT connects never completed. */
       case BT_HCI_OP_LE_WRITE_DEFAULT_DATA_LEN:
       case BT_HCI_OP_LE_SET_RPA_TIMEOUT:
       case BT_HCI_OP_SET_EVENT_MASK:
@@ -592,17 +595,20 @@ static int sf32lb52_bt_send(struct bt_driver_s *drv,
 
   priv->drop_rx_until_tx = false;
 
-  if (SF32LB52_BT_TRACE && type == BT_ACL_OUT)
+  /* Trace ALL HCI output (commands included) so BREDR command handling
+   * (e.g. Write_Scan_Enable) can be verified end-to-end. */
+  if (SF32LB52_BT_TRACE)
     {
       syslog(LOG_INFO,
-             "sf32lb52 bth4 tx: type=%u len=%lu h4=%02x acl=%02x %02x %02x %02x\n",
+             "sf32lb52 bth4 tx: type=%u len=%lu h4=%02x %02x %02x %02x %02x\n",
              (unsigned int)type,
              (unsigned long)(len + drv->head_reserve),
              hdr[0],
              len >= 1 ? hdr[1] : 0,
              len >= 2 ? hdr[2] : 0,
              len >= 3 ? hdr[3] : 0,
-             len >= 4 ? hdr[4] : 0);
+             len >= 4 ? hdr[4] : 0,
+             len >= 5 ? hdr[5] : 0);
     }
 
   ret = sf32lb52_host_send_packet(hdr, len + drv->head_reserve);
