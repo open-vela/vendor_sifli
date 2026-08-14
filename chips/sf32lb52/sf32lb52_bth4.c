@@ -610,16 +610,17 @@ static int sf32lb52_bt_send(struct bt_driver_s *drv,
    * (e.g. Write_Scan_Enable) can be verified end-to-end. */
   if (SF32LB52_BT_TRACE)
     {
+      char thex[256];
+      int tpos = 0;
+      int tn = (len + drv->head_reserve > 40) ? 40 : (int)(len + drv->head_reserve);
+      for (int i = 0; i < tn && tpos < 200; i++) {
+        tpos += snprintf(&thex[tpos], sizeof(thex) - tpos, "%02x ", hdr[i]);
+      }
       syslog(LOG_INFO,
-             "sf32lb52 bth4 tx: type=%u len=%lu h4=%02x %02x %02x %02x %02x\n",
+             "sf32lb52 bth4 tx: type=%u len=%lu h4=%s\n",
              (unsigned int)type,
              (unsigned long)(len + drv->head_reserve),
-             hdr[0],
-             len >= 1 ? hdr[1] : 0,
-             len >= 2 ? hdr[2] : 0,
-             len >= 3 ? hdr[3] : 0,
-             len >= 4 ? hdr[4] : 0,
-             len >= 5 ? hdr[5] : 0);
+             thex);
     }
 
   ret = sf32lb52_host_send_packet(hdr, len + drv->head_reserve);
