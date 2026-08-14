@@ -500,10 +500,10 @@ static int sf32lb52_bt_recv_cb(uint8_t *data, uint16_t len)
 
 #if SF32LB52_BT_TRACE
   {
-    char hex[64];
+    char hex[256];
     int pos = 0;
-    int n = (len > 8) ? 8 : len;
-    for (int i = 0; i < n && pos < 56; i++) {
+    int n = (len > 40) ? 40 : len;
+    for (int i = 0; i < n && pos < 200; i++) {
       pos += snprintf(&hex[pos], sizeof(hex) - pos, "%02x ",
                       priv->rxbuf[i]);
     }

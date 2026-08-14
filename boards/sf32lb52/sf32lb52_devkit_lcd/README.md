@@ -143,8 +143,18 @@ cmake -B cmake_out/sf32lb52_devkit_lcd -S "$PWD/nuttx" -GNinja \
 cmake --build cmake_out/sf32lb52_devkit_lcd
 ```
 
-The build produces `cmake_out/sf32lb52_devkit_lcd/nuttx.bin` (~1 MB), to
-be flashed to the on-package NOR at offset `0x12010000`.
+A direct CMake build produces `cmake_out/sf32lb52_devkit_lcd/nuttx.bin`
+(~1 MB). Alternatively, use the helper from the repository root. It builds
+through `lunch + m` and writes `out/sifli_sf32lb52_devkit_lcd_nsh/nuttx.bin`:
+
+```bash
+./build_and_flash.sh                            # Build and flash
+./build_and_flash.sh build -j 8                 # Build only
+./build_and_flash.sh flash --port /dev/ttyUSB0  # Flash an existing image
+```
+
+The two build flows use different output directories. To flash the direct
+CMake output, pass `--image cmake_out/sf32lb52_devkit_lcd/nuttx.bin`.
 
 ## Flash
 
@@ -160,11 +170,18 @@ ESP32. **Automated flashing and self-testing rely on this wiring** —
 do not cut or pull-up the trace if you intend to use `sftool` from CI.
 
 ```bash
+# PORT may be /dev/ttyACM0 or /dev/ttyUSB0.
+PORT=/dev/ttyUSB0
 # Erase + write nuttx.bin to NOR @ 0x12010000, then soft-reset into NSH
-sftool -c SF32LB52 -p /dev/ttyUSB0 -b 1000000 \
+sftool -c SF32LB52 -p "$PORT" -b 1000000 \
        --before default_reset --after soft_reset \
        write_flash cmake_out/sf32lb52_devkit_lcd/nuttx.bin@0x12010000
 ```
+
+The helper auto-detects ttyACM/ttyUSB when there is exactly one candidate. If
+several ports exist, pass `--port` explicitly to avoid flashing the wrong
+device. By default, `sftool --before default_reset` owns the serial port and
+performs the RTS reset; do not run a separate pyserial RTS toggle in parallel.
 
 The DevKit-LCD also has a **physical Reset button** in addition to the
 RTS-driven soft reset. If `sftool` reports `Failed to connect to the

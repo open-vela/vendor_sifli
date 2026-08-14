@@ -131,8 +131,18 @@ cmake -B cmake_out/sf32lb52_devkit_lcd -S "$PWD/nuttx" -GNinja \
 cmake --build cmake_out/sf32lb52_devkit_lcd
 ```
 
-`cmake_out/sf32lb52_devkit_lcd/nuttx.bin`（约 1 MB）是最终烧录到内置
-NOR 偏移 `0x12010000` 的镜像。
+`cmake_out/sf32lb52_devkit_lcd/nuttx.bin`（约 1 MB）是直接使用 CMake
+构建时生成的镜像。也可以在工程根目录使用一键脚本；它通过 `lunch + m`
+构建，默认产物为 `out/sifli_sf32lb52_devkit_lcd_nsh/nuttx.bin`：
+
+```bash
+./build_and_flash.sh                         # 编译并烧录
+./build_and_flash.sh build -j 8              # 仅编译
+./build_and_flash.sh flash --port /dev/ttyUSB0  # 仅烧录已有镜像
+```
+
+两种构建流程的产物目录不同；烧录直接 CMake 生成的镜像时请显式使用
+`--image cmake_out/sf32lb52_devkit_lcd/nuttx.bin`。
 
 ## 烧录
 
@@ -147,11 +157,18 @@ toggle RTS 即可硬复位 SoC，与 ESP-IDF / `esptool.py` 在 ESP32 上的
 `sftool`，请勿切断或上拉这条走线。
 
 ```bash
+# PORT 可能是 /dev/ttyACM0 或 /dev/ttyUSB0
+PORT=/dev/ttyUSB0
 # 擦除 + 把 nuttx.bin 烧到 NOR @ 0x12010000，再 soft-reset 进入 NSH
-sftool -c SF32LB52 -p /dev/ttyUSB0 -b 1000000 \
+sftool -c SF32LB52 -p "$PORT" -b 1000000 \
        --before default_reset --after soft_reset \
        write_flash cmake_out/sf32lb52_devkit_lcd/nuttx.bin@0x12010000
 ```
+
+一键脚本会在只有一个候选设备时自动探测 ttyACM/ttyUSB；存在多个串口时，
+请用 `--port` 明确指定，避免烧录错误设备。默认由
+`sftool --before default_reset` 独占串口并完成 RTS 复位，不需要同时运行
+pyserial 手动拉 RTS。
 
 DevKit-LCD 在 RTS 软复位之外，还有一颗**物理 Reset 按键**作为后备。
 如果 `sftool` 报 `Failed to connect to the chip`，说明 SoC 的 ROM

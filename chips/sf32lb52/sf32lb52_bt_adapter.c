@@ -48,7 +48,7 @@
 #define SF32LB52_BT_NVDS_BUF_START 0x2040FE00
 #define SF32LB52_BT_NVDS_BUF_SIZE  512
 #define SF32LB52_BT_NVDS_PATTERN   0x4e564453
-#define SF32LB52_BT_TRACE          0
+#define SF32LB52_BT_TRACE          1
 #define SF32LB52_BT_H4_CMD         0x01
 
 typedef enum
@@ -904,6 +904,16 @@ int sf32lb52_host_send_packet(const uint8_t *data, uint16_t len)
       !g_sf32lb52_bt_env.queue_open)
     {
       return -ENODEV;
+    }
+
+  /* Trace every HCI packet (commands included) to verify BREDR command
+   * flow end-to-end (e.g. Write_Scan_Enable 0x0C1A). */
+  if (SF32LB52_BT_TRACE)
+    {
+      syslog(LOG_INFO,
+             "sf32lb52 host tx: len=%u %02x %02x %02x %02x %02x %02x\n",
+             (unsigned int)len,
+             data[0], data[1], data[2], data[3], data[4], data[5]);
     }
 
   offset = 0;
