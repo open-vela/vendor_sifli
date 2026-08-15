@@ -443,8 +443,10 @@ static bool sf32lb52_bt_emulate_cmd(struct sf32lb52_bt_priv_s *priv,
        * Sifli SDK BT PAN example confirms the controller supports BR
        * scan enable). Not part of bt_br_init(), so a controller error
        * only fails set_scan_mode, never stack enable. */
-      case BT_HCI_OP_WRITE_PAGE_SCAN_ACTIVITY:
-      case BT_HCI_OP_WRITE_INQUIRY_SCAN_ACTIVITY:
+      /* PAGE/INQUIRY SCAN ACTIVITY also forwarded: the LCPU default
+       * activity is invalid (0), so page scan never actually scanned and
+       * phones got "couldn't communicate" right after discovery. zblue
+       * sets explicit activity at init (bt_br_init). */
       case BT_HCI_OP_WRITE_PAGE_TIMEOUT:
       case BT_HCI_OP_WRITE_CLASS_OF_DEVICE:
       case BT_HCI_OP_WRITE_INQUIRY_SCAN_TYPE:
@@ -507,6 +509,22 @@ static int sf32lb52_bt_recv_cb(uint8_t *data, uint16_t len)
 
   memcpy(&priv->rxbuf[priv->rxlen], data, len);
   priv->rxlen += len;
+
+  /* LCPU Encryption Change events carry an extra byte:
+   *   04 13 05 <st> <handle_lo> <handle_hi> <enc> <00>   (len 5 params)
+   * while the standard event has 4 parameter bytes (status handle enc).
+   * zblue reads the first byte as status, so the LCPU's byte order makes
+   * it see status=0x01 (failure) and aborts the security flow even though
+   * encryption actually succeeded. Normalize the status byte to 0.
+   * The trailing extra byte is ignored by the fixed-size struct parse. */
+  if (priv->rxlen >= 8 && priv->rxbuf[0] == 0x04 && priv->rxbuf[1] == 0x13 &&
+      priv->rxbuf[2] == 0x05)
+    {
+      syslog(LOG_INFO,
+             "sf32lb52 bth4: normalize EncryptChange status 0x%02x -> 0 (handle 0x%02x%02x enc %d)\n",
+             priv->rxbuf[3], priv->rxbuf[5], priv->rxbuf[4], priv->rxbuf[6]);
+      priv->rxbuf[3] = 0x00;
+    }
 
 #if SF32LB52_BT_TRACE
   {
