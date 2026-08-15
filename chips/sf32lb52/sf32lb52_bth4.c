@@ -451,7 +451,12 @@ static bool sf32lb52_bt_emulate_cmd(struct sf32lb52_bt_priv_s *priv,
       case BT_HCI_OP_WRITE_EXTENDED_INQUIRY_RESPONSE:
       case BT_HCI_OP_WRITE_INQUIRY_MODE:
       case BT_HCI_OP_WRITE_PAGE_SCAN_TYPE:
-      case BT_HCI_OP_WRITE_SSP_MODE:
+      /* WRITE_SSP_MODE is FORWARDED to the LCPU controller: emulated
+       * success kept the controller in legacy-PIN-only pairing, which
+       * HyperOS phones silently ignore (no PIN dialog) -> pairing stalls
+       * and the link fails. LCPU reports LMP 5.3 (SSP capable). It is part
+       * of bt_br_init(), so a controller error would fail stack enable -
+       * acceptable, we want the real mode. */
       case BT_HCI_OP_WRITE_SC_HOST_SUPP:
       case BT_HCI_OP_WRITE_DEFAULT_LINK_POLICY_SETTINGS:
       case BT_HCI_OP_HOST_BUFFER_SIZE:
