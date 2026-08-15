@@ -437,7 +437,12 @@ static bool sf32lb52_bt_emulate_cmd(struct sf32lb52_bt_priv_s *priv,
       case BT_HCI_OP_SET_EVENT_MASK:
       case BT_HCI_OP_SET_EVENT_MASK_PAGE_2:
       case BT_HCI_OP_WRITE_LOCAL_NAME:
-      case BT_HCI_OP_WRITE_SCAN_ENABLE:
+      /* WRITE_SCAN_ENABLE is FORWARDED to the LCPU controller: emulated
+       * success left BR inquiry/page scan disabled forever, so phones
+       * could never discover this board over BR/EDR (observed 2026-08-15;
+       * Sifli SDK BT PAN example confirms the controller supports BR
+       * scan enable). Not part of bt_br_init(), so a controller error
+       * only fails set_scan_mode, never stack enable. */
       case BT_HCI_OP_WRITE_PAGE_SCAN_ACTIVITY:
       case BT_HCI_OP_WRITE_INQUIRY_SCAN_ACTIVITY:
       case BT_HCI_OP_WRITE_PAGE_TIMEOUT:
