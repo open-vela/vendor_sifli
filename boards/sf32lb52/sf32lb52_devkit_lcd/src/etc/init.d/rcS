@@ -18,17 +18,20 @@
  *    "nsh: audio_setup: command not found" and stopped there - bluetoothd
  *    and ai_agent never ran at all.
  *
- * /data/misc/bt has to exist before bluetoothd starts. It holds the bond
- * database (service/common/bt_storage.c) and the last-NAP address that PAN
- * auto-reconnect reads back on the next boot (profiles/pan/panu_service.c),
- * and neither layer creates the directory itself. mkdir -p succeeds when it
- * is already there, which rule 2 requires.
+ * /data/misc/bt holds the bond database (service/common/bt_storage.c) and the
+ * last-NAP address that PAN auto-reconnect reads back on the next boot
+ * (profiles/pan/panu_service.c). bluetoothd creates it itself:
+ * create_bt_folder() in service/src/btservice.c mkdir()s /data/misc and
+ * /data/misc/bt and treats EEXIST as success. So this script must not.
+ * "mkdir -p /data/misc/bt" here broke rule 2 on every boot after the first -
+ * apps/nshlib/nsh_fscmds.c cmd_mkdir returns the raw mkdir() result, and with
+ * -p an existing final component only suppresses the error *message*, still
+ * handing -1 back to NSH, which then dropped the three lines below.
  *
  * This script used to "rm -rf /data/misc/bt" right here, which threw away
  * the bond database and last_nap on every boot: the phone had to be paired
  * again after each reset, and PAN auto-reconnect had no address to aim at.
  */
-mkdir -p /data/misc/bt
 bluetoothd &
 sleep 2
 ai_agent -d &
