@@ -223,24 +223,24 @@ static void sf32lb52_bt_close(struct bt_driver_s *drv);
 static int sf32lb52_bt_recv_cb(uint8_t *data, uint16_t len);
 static int sf32lb52_bt_ensure_controller_enabled(uint16_t opcode);
 
-#ifdef CONFIG_BT
-extern void z_sys_init(void);
-
-static bool g_sf32lb52_zblue_inited;
-
-static void sf32lb52_bt_zblue_init_once(void)
-{
-  if (!g_sf32lb52_zblue_inited)
-    {
-      z_sys_init();
-      g_sf32lb52_zblue_inited = true;
-    }
-}
-#else
-static void sf32lb52_bt_zblue_init_once(void)
-{
-}
-#endif
+/* zblue's SYS_INIT table (z_sys_init) is deliberately NOT run from here.
+ *
+ * Its entries start zblue's work-queue threads (sysworkq, "BT LW WQ"), and
+ * k_thread_create() in the zblue port creates them as pthreads of whatever
+ * task called it. NuttX file descriptor tables are per task group, so those
+ * threads have to belong to the process that opens /dev/ttyHCI0 - bluetoothd,
+ * via bt_sal_init() -> z_sys_init() -> ... -> h4_open(). Calling it here as
+ * well used to create a second sysworkq and a second BT LW WQ on the same
+ * static K_THREAD_STACK_DEFINE() buffers, which is what hard-faulted the
+ * "BT LW WQ" thread a couple of seconds into boot once rcS started
+ * bluetoothd automatically. z_sys_init() is now idempotent too
+ * (external/zblue port/kernel/init.c), so the first caller wins - it must be
+ * bluetoothd, not this driver.
+ *
+ * Registering the character device is all this driver owes the stack: the
+ * H4 device entry's init_fn only logs, and the fd plus the RX thread are
+ * created later in h4_open().
+ */
 
 static uint16_t sf32lb52_bt_get_le16(const uint8_t *data)
 {
@@ -1423,8 +1423,6 @@ int sf32lb52_bt_initialize(void)
       wlerr("Failed to register /dev/ttyHCI0: %d\n", ret);
       return ret;
     }
-
-  sf32lb52_bt_zblue_init_once();
 
   return OK;
 }
