@@ -1358,6 +1358,14 @@ menu "On-chip Peripheral RTOS Drivers"
         help
             Enable LCPU patch binary and install from HCPU
 
+    config SF32LB52_BT_TRACE_ACL_FULL
+        bool "Trace full-length HCI ACL packets"
+        default n
+        help
+            Dump every HCI ACL packet in full, 32 bytes per syslog line, so
+            that docs_ble/tools/bnep_pcap.py can rebuild a pcap for
+            Wireshark's BNEP dissector. Very verbose - debug builds only.
+
     menuconfig BSP_USING_PDM
         bool "Enable PDM audio driver"
         select RT_USING_AUDIO
