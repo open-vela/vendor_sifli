@@ -36,7 +36,15 @@
 #include "sf32lb52_bt_adapter.h"
 
 #define SF32LB52_BT_H4_RX_BUFSIZE 2048
-#define SF32LB52_BT_TRACE         1
+
+/* Per-chunk HCI tracing. It was pinned on through the whole bring-up, but it
+ * emits a syslog line for every chunk the LCPU hands up, which on the BNEP
+ * data path means one console write per ACL packet. Debug builds only. */
+#ifdef CONFIG_SF32LB52_BT_TRACE
+#  define SF32LB52_BT_TRACE 1
+#else
+#  define SF32LB52_BT_TRACE 0
+#endif
 
 /* Full-length ACL tracing for Gate B (docs_ble/tools/gate_b.sh). Emitted in
  * 32-byte chunks so the hex buffer stays off the 1200-byte BT RX stack.
