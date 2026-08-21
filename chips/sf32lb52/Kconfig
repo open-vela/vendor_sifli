@@ -1358,6 +1358,23 @@ menu "On-chip Peripheral RTOS Drivers"
         help
             Enable LCPU patch binary and install from HCPU
 
+    config SF32LB52_BT_TRACE
+        bool "Trace HCI traffic crossing the H4 driver"
+        default n
+        help
+            Log the first 40 bytes of every chunk the LCPU hands up, plus the
+            command/event bookkeeping the bring-up work needed. That is one
+            syslog line per UART chunk, which costs real time on the BNEP
+            data path - keep it off in a product build.
+
+    config SF32LB52_BT_TRACE_ACL_FULL
+        bool "Trace full-length HCI ACL packets"
+        default n
+        help
+            Dump every HCI ACL packet in full, 32 bytes per syslog line, so
+            that docs_ble/tools/bnep_pcap.py can rebuild a pcap for
+            Wireshark's BNEP dissector. Very verbose - debug builds only.
+
     menuconfig BSP_USING_PDM
         bool "Enable PDM audio driver"
         select RT_USING_AUDIO

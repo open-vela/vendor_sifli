@@ -246,6 +246,12 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void)
    */
 
 #ifdef CONFIG_BSP_QSPI2_USING_DMA
+  /* NOTE: the DMA page-program path writes nothing on this board (the
+   * verify step keeps reading back 0xFF while the write reports success),
+   * while the manual FIFO path is known-good.  Keep hflash->dma = NULL so
+   * HAL_QSPIEX_WRITE_PAGE falls back to the FIFO path.
+   */
+#if 0
   hflash->dma = &g_spi_nor_flash_dma_handle;
   hflash->dma->Instance                 = FLASH2_DMA_INSTANCE;
   hflash->dma->Init.Request             = FLASH2_DMA_REQUEST;
@@ -258,6 +264,7 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void)
   hflash->dma->Init.Priority            = DMA_PRIORITY_MEDIUM;
   hflash->dma->Init.BurstSize           = 1;
   HAL_FLASH_SET_TXSLOT(hflash, hflash->dma->Init.BurstSize);
+#endif
 
 #else
   syslog(LOG_WARNING,
@@ -833,6 +840,28 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_nor_erase_range(FAR FLASH_HandleTypeDef *
   return OK;
 }
 
+/* QPP (quad page program) requires the flash chip's QE bit, but the
+ * vendor HAL never programs QE for NOR flash (NOR_TYPE0 has no WRSR2),
+ * so quad writes are silently ignored by the chip.  Use single-line PP
+ * (0x02) instead, which works regardless of the QE state; the caller
+ * restores quad mode afterwards so XIP reads keep working.
+ */
+
+static int SF32LB_FLASH_RAMFUNC
+sf32lb_flash_write_page_single(FAR FLASH_HandleTypeDef *hflash,
+                               uint32_t addr,
+                               FAR const uint8_t *buf,
+                               uint32_t size)
+{
+  int ret;
+
+  hflash->Mode = HAL_FLASH_NOR_MODE;
+  ret = HAL_QSPIEX_WRITE_PAGE(hflash, addr, buf, size);
+  hflash->Mode = HAL_FLASH_QMODE;
+
+  return ret;
+}
+
 static ssize_t SF32LB_FLASH_RAMFUNC sf32lb_nor_write_range(FAR FLASH_HandleTypeDef *hflash,
                                                            uint32_t addr,
                                                            FAR const uint8_t *buffer,
@@ -847,6 +876,7 @@ static ssize_t SF32LB_FLASH_RAMFUNC sf32lb_nor_write_range(FAR FLASH_HandleTypeD
   uint32_t phys_addr;
   ssize_t cnt;
   int ret;
+  irqstate_t flags;
   FAR const uint8_t *tbuf;
   FAR const uint8_t *chunk_buf;
   uint8_t stage_buf[QSPI_NOR_PAGE_SIZE];
@@ -899,7 +929,10 @@ static ssize_t SF32LB_FLASH_RAMFUNC sf32lb_nor_write_range(FAR FLASH_HandleTypeD
         }
 
       sf32lb_flash_lock();
-      ret = HAL_QSPIEX_WRITE_PAGE(hflash, taddr, chunk_buf, start);
+      flags = up_irq_save();
+      ret = sf32lb_flash_write_page_single(hflash, taddr, chunk_buf,
+                                           start);
+      up_irq_restore(flags);
       sf32lb_flash_unlock();
       if (ret != (int)start)
         {
@@ -942,7 +975,10 @@ static ssize_t SF32LB_FLASH_RAMFUNC sf32lb_nor_write_range(FAR FLASH_HandleTypeD
         }
 
       sf32lb_flash_lock();
-      ret = HAL_QSPIEX_WRITE_PAGE(hflash, taddr, chunk_buf, aligned_size);
+      flags = up_irq_save();
+      ret = sf32lb_flash_write_page_single(hflash, taddr, chunk_buf,
+                                           aligned_size);
+      up_irq_restore(flags);
       sf32lb_flash_unlock();
       if (ret != (int)aligned_size)
         {
@@ -985,7 +1021,10 @@ static ssize_t SF32LB_FLASH_RAMFUNC sf32lb_nor_write_range(FAR FLASH_HandleTypeD
         }
 
       sf32lb_flash_lock();
-      ret = HAL_QSPIEX_WRITE_PAGE(hflash, taddr, chunk_buf, tsize);
+      flags = up_irq_save();
+      ret = sf32lb_flash_write_page_single(hflash, taddr, chunk_buf,
+                                           tsize);
+      up_irq_restore(flags);
       sf32lb_flash_unlock();
       if (ret != (int)tsize)
         {

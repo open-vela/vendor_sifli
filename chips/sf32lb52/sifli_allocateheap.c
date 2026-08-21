@@ -44,7 +44,26 @@ extern void BSP_Board_PreInit(void);
 
 #define SRAM_START  0x20000000
 #define SRAM_SIZE   0x00080000    /* 512 KB */
-#define SRAM_END    (SRAM_START + SRAM_SIZE)
+
+/* The top of HPSYS RAM does not belong to us.  From
+ * vendor/sifli/chips/drivers/cmsis/sf32lb52x/mem_map.h, top down:
+ *
+ *   0x2007FE00..0x2007FFFF  HCPU2LCPU_MB_CH1 buffer - the BT HCI H4 ring
+ *   0x2007FC00..0x2007FDFF  HCPU2LCPU_MB_CH2 buffer
+ *   0x2007FB00..0x2007FBFF  HCPU custom config
+ *
+ * i.e. HCPU_RAM_DATA ends at 0x2007FAFF.  Letting the heap run to 0x20080000
+ * stays invisible until the heap actually grows that far: the LCPU then
+ * writes incoming HCI bytes and its ring read pointer straight through
+ * whatever malloc() handed out, and heap writes corrupt the ring in the
+ * other direction.  With .bss at ~455 KB the heap is only ~32 KB, so it does
+ * reach up there - that is what made getenv() take a HardFault inside nsh
+ * once BNEP traffic started flowing, and why the symptom moved around
+ * whenever .bss size changed.
+ */
+
+#define SRAM_RESERVED_TOP 0x2007fb00
+#define SRAM_END          SRAM_RESERVED_TOP
 
 /* PSRAM memory configuration for SF32LB52 (MPI1 SBUS) */
 

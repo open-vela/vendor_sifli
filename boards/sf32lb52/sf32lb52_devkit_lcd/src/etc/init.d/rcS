@@ -1,0 +1,37 @@
+/* This file is run through "gcc -E -P -x c" before it is packed into the
+ * /etc romfs (nuttx/cmake/nuttx_toolchain.cmake:92), so comments have to be
+ * C comments - a '#' line is an invalid preprocessing directive and fails
+ * the build. The upside is that these comments never reach the board.
+ *
+ * Two rules for anything added below:
+ *
+ * 1. Keep lines under 64 characters. NSH reads a script line with
+ *    readline_fd(buffer, CONFIG_NSH_LINELEN, ...) and CONFIG_NSH_LINELEN is
+ *    64 here, so the tail of a longer line comes back as the next line and
+ *    is parsed as a command of its own.
+ *
+ * 2. Do not run anything that can fail. nsh_initscript() leaves
+ *    NSH_PFLAG_IGNORE clear, so apps/nshlib/nsh_script.c loops
+ *    "while (ret >= 0)" and the first failing command silently drops every
+ *    line below it. This script used to start with "audio_setup", which is
+ *    not a builtin in any config in this tree, so every boot printed
+ *    "nsh: audio_setup: command not found" and stopped there - bluetoothd
+ *    and ai_agent never ran at all.
+ *
+ * /data/misc/bt holds the bond database (service/common/bt_storage.c) and the
+ * last-NAP address that PAN auto-reconnect reads back on the next boot
+ * (profiles/pan/panu_service.c). bluetoothd creates it itself:
+ * create_bt_folder() in service/src/btservice.c mkdir()s /data/misc and
+ * /data/misc/bt and treats EEXIST as success. So this script must not.
+ * "mkdir -p /data/misc/bt" here broke rule 2 on every boot after the first -
+ * apps/nshlib/nsh_fscmds.c cmd_mkdir returns the raw mkdir() result, and with
+ * -p an existing final component only suppresses the error *message*, still
+ * handing -1 back to NSH, which then dropped the three lines below.
+ *
+ * This script used to "rm -rf /data/misc/bt" right here, which threw away
+ * the bond database and last_nap on every boot: the phone had to be paired
+ * again after each reset, and PAN auto-reconnect had no address to aim at.
+ */
+bluetoothd &
+sleep 2
+ai_agent -d &
