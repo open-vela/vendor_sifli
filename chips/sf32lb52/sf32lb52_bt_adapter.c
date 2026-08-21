@@ -48,7 +48,14 @@
 #define SF32LB52_BT_NVDS_BUF_START 0x2040FE00
 #define SF32LB52_BT_NVDS_BUF_SIZE  512
 #define SF32LB52_BT_NVDS_PATTERN   0x4e564453
-#define SF32LB52_BT_TRACE          1
+/* Per-frame IPC tracing. One syslog line per HCI frame is far too much for
+ * the BNEP data path (it alone can stall the mailbox), so it follows the
+ * pandbg-only CONFIG_SF32LB52_BT_TRACE, same as sf32lb52_bth4.c. */
+#ifdef CONFIG_SF32LB52_BT_TRACE
+#  define SF32LB52_BT_TRACE        1
+#else
+#  define SF32LB52_BT_TRACE        0
+#endif
 #define SF32LB52_BT_H4_CMD         0x01
 
 typedef enum
@@ -404,19 +411,36 @@ static void sf32lb52_bt_log_tx_state(struct circular_buf *tx_ring,
 }
 #endif
 
+/* One H4 frame must reach the ring in a single circular_buf write.
+ *
+ * The HCPU and the LCPU share `struct circular_buf`, whose read_idx_mirror
+ * (LCPU-owned) and write_idx_mirror (HCPU-owned) live in the same D-cache
+ * line.  sf32lb52_bt_ring_write() ends with up_clean_dcache() over that
+ * header, so the whole line - including the HCPU's cached copy of
+ * read_idx_mirror - is written back.  If the LCPU has advanced its read
+ * pointer since we last invalidated, that write-back rewinds it: the LCPU
+ * re-reads bytes it already consumed, its H4 parser desynchronises and it
+ * raises Hardware_Error (0x10, code 0x00), after which it stops returning
+ * Number_Of_Completed_Packets and ACL TX dead-locks.
+ *
+ * Splitting a frame (the old code emitted the 1-byte H4 type first, with a
+ * mailbox trigger after it) opened exactly that window: the LCPU starts
+ * draining the type byte while we are still memcpy'ing the body.  Writing
+ * the frame in one shot, with the single trigger after the clean, means the
+ * LCPU has nothing to read until the header is already coherent.
+ *
+ * sf32lb52_bt_publish() waits for an empty ring first, so any frame up to
+ * SF32LB52_BT_RING_DATA_SIZE fits; bth4 caps ACL_Data_Packet_Length so no
+ * HCI frame is ever larger than that.
+ */
+
 static size_t sf32lb52_bt_tx_chunk_len(const uint8_t *data,
                                        size_t len,
                                        size_t offset)
 {
-  size_t remaining = len - offset;
+  UNUSED(data);
 
-  if (offset == 0 && remaining > 1)
-    {
-      return 1;
-    }
-
-  return remaining;
-}
+  return len - offset;}
 
 static void sf32lb52_bt_rx_worker(FAR void *arg)
 {

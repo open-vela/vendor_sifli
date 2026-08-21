@@ -22,6 +22,18 @@
 
 #include <stdint.h>
 
+/* Largest H4 frame that reaches the LCPU in a single circular_buf write.
+ *
+ * The HCPU->LCPU mailbox ring holds HCPU2LCPU_MB_CH1_BUF_SIZE (512) bytes
+ * minus the 20-byte struct circular_buf header, rounded down to a word: 492.
+ * A frame larger than this has to be streamed in several ring writes, which
+ * re-opens the read_idx_mirror write-back race documented next to
+ * sf32lb52_bt_tx_chunk_len() and makes the LCPU raise Hardware_Error.  bth4
+ * reports an ACL_Data_Packet_Length small enough to stay under this bound.
+ */
+
+#define SF32LB52_BT_MAX_H4_FRAME 492
+
 typedef int (*sf32lb52_bt_rx_callback_t)(uint8_t *data, uint16_t len);
 
 int sf32lb52_bt_controller_init(void);

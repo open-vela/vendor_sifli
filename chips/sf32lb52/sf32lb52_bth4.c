@@ -37,6 +37,19 @@
 
 #define SF32LB52_BT_H4_RX_BUFSIZE 2048
 
+/* Synthesised HCI_Read_Buffer_Size response (see BT_HCI_OP_READ_BUFFER_SIZE).
+ *
+ * The LCPU only accepts an H4 frame that arrives in one mailbox ring write,
+ * so ACL_Data_Packet_Length is bounded by SF32LB52_BT_MAX_H4_FRAME minus the
+ * 1-byte H4 type and the 4-byte HCI ACL header.  Anything larger is split
+ * across ring writes and trips the read-pointer write-back race that makes
+ * the LCPU raise Hardware_Error.  zblue fragments longer L2CAP PDUs into
+ * several ACL packets, which works because sf32lb52_bt_publish() drains the
+ * ring between frames.
+ */
+
+#define SF32LB52_HCI_ACL_TX_LEN  (SF32LB52_BT_MAX_H4_FRAME - 1 - 4)
+#define SF32LB52_HCI_ACL_TX_PKTS 4
 /* Per-chunk HCI tracing. It was pinned on through the whole bring-up, but it
  * emits a syslog line for every chunk the LCPU hands up, which on the BNEP
  * data path means one console write per ACL packet. Debug builds only. */
@@ -485,105 +498,40 @@ static void sf32lb52_bt_send_hci_cmd(struct sf32lb52_bt_priv_s *priv,
   sf32lb52_host_send_packet(cmd, (uint16_t)len);
 }
 
-/* R104: SSP auto-reply in bth4 — mimics xiaozhi BTS2 approach.
- * Intercept SSP events at the HCI transport layer, auto-reply to the
- * controller, and swallow the events so zblue's SSP handler (which
- * crashes due to bt_hci_cmd_send_sync on sysworkq) is never invoked.
+/* R104: SSP auto-reply in bth4 — REMOVED (2026-08-20).
  *
- * Events we handle:
- *   0x24 IO_CAPA_REQ       → reply IO_CAPABILITY_REPLY (DisplayYesNo, MITM)
- *   0x26 USER_CONFIRM_REQ  → reply USER_CONFIRM_REPLY (auto-accept)
- *   0x17 LINK_KEY_REQ      → reply LINK_KEY_REQ_NEG_REPLY (no stored key)
+ * The original version intercepted SSP events and replied to the controller
+ * directly via sf32lb52_bt_send_hci_cmd(), which calls sf32lb52_host_send()
+ * with an HCI command that lacks the H4 type-byte prefix (0x01). The
+ * controller interprets the first opcode byte as the H4 type, decodes the
+ * rest of the command as garbage, and responds with Hardware Error (0x00).
+ * From that point every subsequent HCI command times out — the controller
+ * is effectively dead.
  *
- * Events we pass through to zblue:
- *   0x18 LINK_KEY_NOTIFY   → zblue stores the key
- *   0x36 SSP_COMPLETE      → zblue marks pairing done
- *   0x06 AUTH_COMPLETE     → zblue triggers encryption
- *   0x08 ENCRYPT_CHANGE    → zblue marks link encrypted
+ * The fix is to let zblue handle all SSP events natively:
+ *   0x24 IO_CAPA_REQ      → SSP converter rewrites to 0x31 → zblue replies
+ *   0x26 USER_CONFIRM_REQ → SSP converter rewrites to 0x33 → zblue auto-accepts
+ *   0x17 LINK_KEY_REQ     → zblue looks up br_key.bin and replies with the
+ *                             stored key, or NEG_REPLY to trigger pairing
+ * All reply commands go through bt_hci_cmd_send_sync(), which prepends the
+ * H4 byte before handing to the transport driver.
+ *
+ * The original sysworkq deadlock that motivated this auto-reply no longer
+ * exists: send_sync handles sysworkq context by draining the cmd queue
+ * (hci_core.c:487-517), and the ncmd semaphore is correctly maintained
+ * when all commands go through zblue.
+ *
+ * R74 Set_Event_Mask bit-7 fix (in bth4 R70) enables Encrypt_Change events,
+ * and keys_br.c provides file-backed link key persistence. SSP now works
+ * end-to-end through zblue.
  */
 static bool sf32lb52_bt_handle_ssp_auto(struct sf32lb52_bt_priv_s *priv,
                                          const uint8_t *frame, size_t len)
 {
-  uint8_t evt;
-  uint16_t opcode;
-  uint8_t cmd[12];
-
-  if (len < 3 || frame[0] != H4_EVT)
-    {
-      return false;
-    }
-
-  evt = frame[1];
-
-  switch (evt)
-    {
-    case 0x24: /* IO_CAPA_REQ: bdaddr(6) */
-      {
-        if (len < 3 + 6) return false;
-        const uint8_t *addr = &frame[3];
-
-        /* Send IO_CAPABILITY_REPLY:
-         * bdaddr(6) + capability(1) + oob(1) + auth(1) = 9 bytes */
-        opcode = BT_HCI_OP_IO_CAPABILITY_REPLY;
-        cmd[0] = (uint8_t)(opcode & 0xff);
-        cmd[1] = (uint8_t)(opcode >> 8);
-        cmd[2] = 9; /* param length */
-        memcpy(&cmd[3], addr, 6);
-        cmd[9] = 0x01; /* capability = DisplayYesNo */
-        cmd[10] = 0x00; /* oob = not present */
-        cmd[11] = 0x01; /* auth = MITM required (General Bonding) */
-
-        sf32lb52_bt_send_hci_cmd(priv, cmd, 12);
-        syslog(LOG_INFO,
-               "sf32lb52 bth4 R104: IO_CAPA_REQ auto-reply "
-               "(DisplayYesNo+MITM) for %02x:%02x:%02x:%02x:%02x:%02x\n",
-               addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
-        return true; /* swallow the event */
-      }
-
-    case 0x26: /* USER_CONFIRM_REQ: bdaddr(6) + passkey(4) + auth(1) */
-      {
-        if (len < 3 + 11) return false;
-        const uint8_t *addr = &frame[3];
-
-        /* Send USER_CONFIRM_REPLY: bdaddr(6) = 6 bytes */
-        opcode = BT_HCI_OP_USER_CONFIRM_REPLY;
-        cmd[0] = (uint8_t)(opcode & 0xff);
-        cmd[1] = (uint8_t)(opcode >> 8);
-        cmd[2] = 6; /* param length */
-        memcpy(&cmd[3], addr, 6);
-
-        sf32lb52_bt_send_hci_cmd(priv, cmd, 9);
-        syslog(LOG_INFO,
-               "sf32lb52 bth4 R104: USER_CONFIRM_REQ auto-accept "
-               "for %02x:%02x:%02x:%02x:%02x:%02x\n",
-               addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
-        return true; /* swallow the event */
-      }
-
-    case 0x17: /* LINK_KEY_REQ: bdaddr(6) */
-      {
-        if (len < 3 + 6) return false;
-        const uint8_t *addr = &frame[3];
-
-        /* No stored key — send NEG_REPLY to force re-pairing */
-        opcode = BT_HCI_OP_LINK_KEY_REQ_NEG_REPLY;
-        cmd[0] = (uint8_t)(opcode & 0xff);
-        cmd[1] = (uint8_t)(opcode >> 8);
-        cmd[2] = 6; /* param length */
-        memcpy(&cmd[3], addr, 6);
-
-        sf32lb52_bt_send_hci_cmd(priv, cmd, 9);
-        syslog(LOG_INFO,
-               "sf32lb52 bth4 R104: LINK_KEY_REQ neg-reply "
-               "(no key, force re-pair) for %02x:%02x:%02x:%02x:%02x:%02x\n",
-               addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
-        return true; /* swallow the event */
-      }
-
-    default:
-      return false; /* pass through to zblue */
-    }
+  (void)priv;
+  (void)frame;
+  (void)len;
+  return false; /* all SSP events pass through to zblue */
 }
 
 /* Rewrite a standard LCPU SSP event into the zblue event code. Both
@@ -760,10 +708,18 @@ static bool sf32lb52_bt_emulate_cmd(struct sf32lb52_bt_priv_s *priv,
         return true;
 
       case BT_HCI_OP_READ_BUFFER_SIZE:
+        /* The LCPU has no Read_Buffer_Size of its own, so this response is
+         * synthesised.  ACL_Data_Packet_Length must cover a complete L2CAP
+         * PDU: the LCPU raises Hardware_Error (0x10, code 0x00) as soon as
+         * the host sends a PB=0b01 continuation packet, i.e. it does not
+         * implement host-side ACL fragmentation.  BNEP negotiates a 1691
+         * byte L2CAP MTU with Android NAP, so report 4 + 1691 = 1695 and
+         * zblue never fragments.  Keep in sync with
+         * CONFIG_BT_BUF_ACL_TX_SIZE / CONFIG_BT_L2CAP_TX_MTU. */
         params[0] = SF32LB52_HCI_STATUS_SUCCESS;
-        sf32lb52_bt_put_le16(&params[1], 0x00fb);
+        sf32lb52_bt_put_le16(&params[1], SF32LB52_HCI_ACL_TX_LEN);
         params[3] = 0;
-        sf32lb52_bt_put_le16(&params[4], 4);
+        sf32lb52_bt_put_le16(&params[4], SF32LB52_HCI_ACL_TX_PKTS);
         sf32lb52_bt_put_le16(&params[6], 0);
         *ret = sf32lb52_bt_synth_cmd_complete(priv, opcode, params, 8);
         return true;
