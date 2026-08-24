@@ -41,7 +41,7 @@ nuttx_add_romfs(
   etc/1.txt
   ${HAP_FILES}
   PATH
-  ${CMAKE_CURRENT_LIST_DIR}/etc)
+  ${CMAKE_CURRENT_BINARY_DIR}/etc)
 
 target_link_libraries(board PRIVATE romfs_etc)
 
