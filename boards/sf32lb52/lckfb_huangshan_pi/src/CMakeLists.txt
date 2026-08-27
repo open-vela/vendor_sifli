@@ -69,6 +69,29 @@ if(CONFIG_QUICKAPP)
   if(QUICKAPP_LIBS)
     nuttx_add_extra_library(${QUICKAPP_LIBS})
   endif()
+
+  # system.router / system.app are provided ONLY by the prebuilt
+  # libquickappfeatures.a (there is no source under
+  # frameworks/runtimes/quickapp/modules/{router,app} in this workspace), so the
+  # auto-generated feature registry (jidl_generated/features_registry_table.h)
+  # never lists them and the feature manager never registers them.  Append their
+  # initFeature entries to the generated registry here; referencing the symbols
+  # also makes the linker pull the corresponding objects out of the prebuilt lib.
+  set(_QAPP_REG_DIR ${CMAKE_BINARY_DIR}/jidl_generated)
+  foreach(_qf system_router system_app)
+    set(_qf_stamp ${_QAPP_REG_DIR}/feature_${_qf}.pdat)
+    add_custom_command(
+      OUTPUT ${_qf_stamp}
+      COMMAND echo "bool jse_${_qf}_initFeature(FeatureRegistryHandle handle);" >>
+              ${_QAPP_REG_DIR}/features_registry_list.h
+      COMMAND echo "jse_${_qf}_initFeature," >>
+              ${_QAPP_REG_DIR}/features_registry_table.h
+      COMMAND touch ${_qf_stamp}
+      VERBATIM
+      COMMENT "register prebuilt quickapp feature: ${_qf}")
+    add_custom_target(quickapp_prebuilt_feature_${_qf} DEPENDS ${_qf_stamp})
+    add_dependencies(apps_context quickapp_prebuilt_feature_${_qf})
+  endforeach()
 endif()
 
 if(CONFIG_CRYPTO)
