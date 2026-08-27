@@ -328,9 +328,25 @@ static int sf32lb_lcd_putrun(FAR struct lcd_dev_s *dev,
                          FAR const uint8_t *buffer, size_t npixels)
 {
   FAR struct sf32lb_lcd_dev_s *priv = (FAR struct sf32lb_lcd_dev_s *)dev;
+  int wait_ms = 0;
 
-  if (s_fb_registering || !s_lcd_hw_ready)
+  if (s_fb_registering)
     {
+      return OK;
+    }
+
+  /* Block until HW is ready instead of silently dropping the frame. */
+
+  while (!s_lcd_hw_ready && wait_ms < 2000)
+    {
+      usleep(5000);
+      wait_ms += 5;
+    }
+
+  if (!s_lcd_hw_ready)
+    {
+      lcdwarn("putrun: HW not ready after %d ms, dropping frame\n",
+              wait_ms);
       return OK;
     }
 
@@ -403,9 +419,22 @@ static int sf32lb_lcd_putarea(FAR struct lcd_dev_s *dev,
   FAR struct sf32lb_lcd_dev_s *priv = (FAR struct sf32lb_lcd_dev_s *)dev;
   size_t bytes_per_pixel;
   size_t row_bytes;
+  int wait_ms = 0;
 
-  if (s_fb_registering || !s_lcd_hw_ready)
+  if (s_fb_registering)
     {
+      return OK;
+    }
+
+  while (!s_lcd_hw_ready && wait_ms < 2000)
+    {
+      usleep(5000);
+      wait_ms += 5;
+    }
+
+  if (!s_lcd_hw_ready)
+    {
+      lcdwarn("putarea: HW not ready after %d ms\n", wait_ms);
       return OK;
     }
 
@@ -725,175 +754,150 @@ static int lcdc1_isr(int irq, void *context, void *arg)
     return OK;
 }
 
-static int lcd_hw_setup_thread_entry(int argc, FAR char *argv[])
-{
-    lcd_drv_desc_t *p_drv_ops = s_drv_lcd.p_drv_ops;
-  int ret;
-  int retry;
-
-#if defined(CONFIG_VIDEO_FB) && defined(CONFIG_LCD_FRAMEBUFFER)
-    /* Register /dev/fb0 first so node creation is not blocked by panel init. */
-    for (retry = 0; retry < 30; retry++)
-      {
-        s_fb_registering = true;
-        ret = fb_register(0, 0);
-        s_fb_registering = false;
-
-        if (ret == OK || ret == -EEXIST)
-          {
-            lcdinfo("fb_register done.\n");
-            break;
-          }
-
-        if (ret != -ENOENT && ret != -ENODEV && ret != -EBUSY)
-          {
-            syslog(LOG_ERR, "ERROR: fb_register() failed: %d\n", ret);
-            break;
-          }
-
-        usleep(100 * 1000);
-      }
-#endif
-
-    if (p_drv_ops && p_drv_ops->p_ops && p_drv_ops->p_ops->Init)
-    {
-        p_drv_ops->p_ops->Init(&s_drv_lcd.hlcdc);
-    }
-
-#ifdef SOC_BF0_HCPU     /* gpio1 only work on hcpu */
-    irq_attach(NX_IRQ(LCDC1_IRQn), lcdc1_isr, (void *)&s_drv_lcd.hlcdc);
-    up_enable_irq(NX_IRQ(LCDC1_IRQn));
-#endif /* SOC_BF0_HCPU */
-
-    HAL_LCDC_SetBgColor(&s_drv_lcd.hlcdc, 0, 0, 0);
-    HAL_LCDC_LayerReset(&s_drv_lcd.hlcdc, HAL_LCDC_LAYER_DEFAULT);
-    HAL_LCDC_LayerSetFormat(&s_drv_lcd.hlcdc, HAL_LCDC_LAYER_DEFAULT,
-                            LCDC_PIXEL_FORMAT_RGB565);
-
-    s_lcd_hw_ready = true;
-
-    return OK;
-}
-
 static int lcd_init_thread_entry(int argc, FAR char *argv[])
 {
-	lcd_drv_desc_t *p_drv_ops;
+  lcd_drv_desc_t *p_drv_ops;
   int ret;
-  int hw_pid;
-  bool lcd_registered = false;
   int retry;
+  bool lcd_registered;
 
-	BSP_LCD_PowerUp();
-	
-	p_drv_ops = find_right_driver();
+  BSP_LCD_PowerUp();
+
+  p_drv_ops = find_right_driver();
 
 #ifdef CONFIG_LCD_USING_CO5300
   if (!p_drv_ops)
-  {
-    p_drv_ops = (lcd_drv_desc_t *)&__lcddriver_co5300;
-  }
+    {
+      p_drv_ops = (lcd_drv_desc_t *)&__lcddriver_co5300;
+    }
 #endif
 
 #ifdef CONFIG_LCD_USING_ILI8688E
   if (!p_drv_ops)
-  {
-    p_drv_ops = (lcd_drv_desc_t *)&__lcddriver_ili8688e;
-  }
+    {
+      p_drv_ops = (lcd_drv_desc_t *)&__lcddriver_ili8688e;
+    }
 #endif
 
-	if (p_drv_ops)
-	{
-    lcdinfo("Init LCD %s", p_drv_ops->name);
+  if (!p_drv_ops)
+    {
+      syslog(LOG_ERR, "ERROR: No LCD driver found\n");
+      s_drv_lcd.p_drv_ops = NULL;
+      sem_post(&s_drv_lcd.init_sem);
+      return -ENODEV;
+    }
 
-		switch(p_drv_ops->p_init_cfg->color_mode)
-		{
-		   case LCDC_PIXEL_FORMAT_RGB565:
-			 s_drv_lcd.bpp = 16;
-			 break;
-		
-		   case LCDC_PIXEL_FORMAT_RGB888:
-			 s_drv_lcd.bpp = 24;
-			 break;
-			 
-         default:
-       s_drv_lcd.bpp = 16;
-       lcdwarn("Unknown color mode %d, fallback to RGB565",
-               p_drv_ops->p_init_cfg->color_mode);
-       break;
-		 }
+  lcdinfo("Init LCD %s", p_drv_ops->name);
 
-  /* Keep framebuffer format aligned with panel color mode (typically RGB565)
-   * so fb writes are sent without intermediate color conversion.
+  switch (p_drv_ops->p_init_cfg->color_mode)
+    {
+      case LCDC_PIXEL_FORMAT_RGB565:
+        s_drv_lcd.bpp = 16;
+        break;
+
+      case LCDC_PIXEL_FORMAT_RGB888:
+        s_drv_lcd.bpp = 24;
+        break;
+
+      default:
+        s_drv_lcd.bpp = 16;
+        lcdwarn("Unknown color mode %d, fallback to RGB565",
+                p_drv_ops->p_init_cfg->color_mode);
+        break;
+    }
+
+  /* Initialise panel hardware BEFORE registering the device node so
+   * that /dev/lcd0 is only visible once the controller is ready.
    */
 
-	}
-
-	/* If find_right_driver fell back without running Init() (panel ReadID
-	 * mismatch is normal for some QSPI panels), make sure the panel is
-	 * actually programmed BEFORE lcddev_register / fb_register triggers
-	 * setpower() -> DisplayOn (REG 0x29). Otherwise the very first WriteReg
-	 * runs against an uninitialised LCDC controller and returns HAL_BUSY.
-	 */
-	if (p_drv_ops && p_drv_ops->p_ops && p_drv_ops->p_ops->Init)
-	{
-		p_drv_ops->p_ops->Init(&s_drv_lcd.hlcdc);
-	}
-
-	s_drv_lcd.p_drv_ops = p_drv_ops; 
-	sem_post(&s_drv_lcd.init_sem);
-
-	if (!p_drv_ops)
-	{
-		syslog(LOG_ERR, "ERROR: No LCD driver found, skip device register\n");
-		return -ENODEV;
-	}
-
-
-#ifdef CONFIG_LCD_DEV
-    lcd_registered = false;
-#endif
-    /* Retry registration to tolerate early-boot timing races. */
-    for (retry = 0; retry < 30; retry++)
+  if (p_drv_ops->p_ops && p_drv_ops->p_ops->Init)
     {
-#ifdef CONFIG_LCD_DEV
-      if (!lcd_registered)
-      {
-        ret = lcddev_register(0);
-        if (ret == OK || ret == -EEXIST)
-        {
-          lcd_registered = true;
-          lcdinfo("lcddev_register done.");
-        }
-        else if (ret != -ENOENT && ret != -ENODEV)
-        {
-          syslog(LOG_ERR, "ERROR: lcddev_register() failed: %d\n", ret);
-          lcd_registered = true; /* stop retrying on hard errors */
-        }
-      }
+      p_drv_ops->p_ops->Init(&s_drv_lcd.hlcdc);
+    }
+
+#ifdef SOC_BF0_HCPU
+  irq_attach(NX_IRQ(LCDC1_IRQn), lcdc1_isr,
+             (void *)&s_drv_lcd.hlcdc);
+  up_enable_irq(NX_IRQ(LCDC1_IRQn));
 #endif
 
-#ifdef CONFIG_LCD_DEV
-      if (lcd_registered)
-      {
-        break;
-      }
-#endif
+  HAL_LCDC_SetBgColor(&s_drv_lcd.hlcdc, 0, 0, 0);
+  HAL_LCDC_LayerReset(&s_drv_lcd.hlcdc, HAL_LCDC_LAYER_DEFAULT);
+  HAL_LCDC_LayerSetFormat(&s_drv_lcd.hlcdc, HAL_LCDC_LAYER_DEFAULT,
+                          LCDC_PIXEL_FORMAT_RGB565);
+
+  /* Final panel init after LCDC is configured.  This matches the
+   * original lcd_hw_setup_thread_entry() sequence which called
+   * Init() a third time after layer setup.  The CO5300 QSPI panel
+   * needs this to reach a known state before the first frame write.
+   */
+
+  if (p_drv_ops->p_ops && p_drv_ops->p_ops->Init)
+    {
+      p_drv_ops->p_ops->Init(&s_drv_lcd.hlcdc);
+    }
+
+  s_drv_lcd.p_drv_ops = p_drv_ops;
+  s_lcd_hw_ready = true;
+  sem_post(&s_drv_lcd.init_sem);
+
+  lcdinfo("LCD HW ready, registering devices\n");
+
+  /* Now register /dev/fb0 and /dev/lcd0 — HW is fully initialised. */
+
+#if defined(CONFIG_VIDEO_FB) && defined(CONFIG_LCD_FRAMEBUFFER)
+  for (retry = 0; retry < 30; retry++)
+    {
+      s_fb_registering = true;
+      ret = fb_register(0, 0);
+      s_fb_registering = false;
+
+      if (ret == OK || ret == -EEXIST)
+        {
+          lcdinfo("fb_register done.\n");
+          break;
+        }
+
+      if (ret != -ENOENT && ret != -ENODEV && ret != -EBUSY)
+        {
+          syslog(LOG_ERR, "ERROR: fb_register() failed: %d\n", ret);
+          break;
+        }
 
       usleep(100 * 1000);
     }
+#endif
 
-    hw_pid = task_create("lcd_hw",
-                         SCHED_PRIORITY_DEFAULT,
-                         8192,
-                         lcd_hw_setup_thread_entry,
-                         NULL);
-
-    if (hw_pid < 0)
+#ifdef CONFIG_LCD_DEV
+  lcd_registered = false;
+  for (retry = 0; retry < 30; retry++)
     {
-      syslog(LOG_ERR, "ERROR: lcd_hw task_create failed: %d\n", errno);
-    }
+      if (!lcd_registered)
+        {
+          ret = lcddev_register(0);
+          if (ret == OK || ret == -EEXIST)
+            {
+              lcd_registered = true;
+              lcdinfo("lcddev_register done.\n");
+            }
+          else if (ret != -ENOENT && ret != -ENODEV)
+            {
+              syslog(LOG_ERR,
+                     "ERROR: lcddev_register() failed: %d\n", ret);
+              lcd_registered = true;
+            }
+        }
 
-	return 0;
+      if (lcd_registered)
+        {
+          break;
+        }
+
+      usleep(100 * 1000);
+    }
+#endif
+
+  return 0;
 }
 /****************************************************************************
  * Public Functions
@@ -911,40 +915,45 @@ static int lcd_init_thread_entry(int argc, FAR char *argv[])
 
 int board_lcd_initialize(void)
 {
-    static bool initialized = false;
+  static bool initialized = false;
   int pid;
 
-    if (initialized)
+  if (initialized)
+    {
       return OK;
-    initialized = true;
+    }
 
-    lcdinfo("board_lcd_initialize\n");
-    
-    memset(&s_drv_lcd, 0, sizeof(s_drv_lcd));
+  lcdinfo("board_lcd_initialize\n");
 
-    s_drv_lcd.hlcdc.Instance = LCDC1;
+  memset(&s_drv_lcd, 0, sizeof(s_drv_lcd));
 
-    s_drv_lcd.select_layer = HAL_LCDC_LAYER_DEFAULT;
-    s_lcd_hw_ready = false;
+  s_drv_lcd.hlcdc.Instance = LCDC1;
+  s_drv_lcd.select_layer = HAL_LCDC_LAYER_DEFAULT;
+  s_lcd_hw_ready = false;
 
-    sem_init(&(s_drv_lcd.init_sem), 0, 0);
-    sem_init(&(s_drv_lcd.draw_sem), 0, 0);
+  sem_init(&(s_drv_lcd.init_sem), 0, 0);
+  sem_init(&(s_drv_lcd.draw_sem), 0, 0);
 
-    /* Keep bringup non-blocking; init/register devices in a worker task. */
+  /* Keep bringup non-blocking; init/register devices in a worker task. */
 
-    pid = task_create("lcd_init",
-                      SCHED_PRIORITY_DEFAULT,
-                      4096,
-                      lcd_init_thread_entry,
-                      NULL);
+  pid = task_create("lcd_init",
+                    SCHED_PRIORITY_DEFAULT,
+                    4096,
+                    lcd_init_thread_entry,
+                    NULL);
 
-    if (pid < 0)
-      {
-        lcdwarn("lcd_init task_create failed: %d", errno);
-        return -errno;
-      }
+  if (pid < 0)
+    {
+      lcdwarn("lcd_init task_create failed: %d", errno);
+      sem_destroy(&(s_drv_lcd.init_sem));
+      sem_destroy(&(s_drv_lcd.draw_sem));
+      return -errno;
+    }
 
-    return OK;
+  /* Only mark initialised after the task is successfully created. */
+
+  initialized = true;
+  return OK;
 }
 
 /****************************************************************************
