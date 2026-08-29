@@ -84,6 +84,54 @@ set(SYSTEM_SRCS ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/sf32lb52x/Templates/syste
 
 target_sources(arch PRIVATE ${SRCS} ${HAL_SRCS} ${SYSTEM_SRCS} ${IPC_QUEUE_SRCS} ${LCPU_BT_SRCS})
 
+# AI Watch custom GATT bridge (CONFIG_AI_WATCH_BLE_BRIDGE).
+#
+# This is the only translation unit outside apps/external/zblue that
+# compiles against zblue headers. It stays narrow on purpose:
+#   - include dirs are attached to this single source file, not the
+#     whole arch target (via the per-source INCLUDE_DIRECTORIES property)
+#   - the wrapper header ai_watch_ble_bsp.h lives in the contest app
+#     directory, reached through the apps/packages symlink
+set(AI_WATCH_BLE_BRIDGE_SRC ${NUTTX_CHIP_ABS_DIR}/sf32lb52_ble_bridge.c)
+set(AI_WATCH_BLE_APP_DIR ${NUTTX_APPS_DIR}/packages/demos/contest2026_403_ai_watch)
+if(CONFIG_AI_WATCH_BLE_BRIDGE AND EXISTS ${AI_WATCH_BLE_BRIDGE_SRC}
+   AND EXISTS ${AI_WATCH_BLE_APP_DIR}/ai_watch_ble_bsp.h)
+  # Mirror the include list of the zblue_headers INTERFACE target
+  # (apps/external/zblue/CMakeLists.default.txt). Keep in sync.
+  set(AI_WATCH_BLE_ZBLUE_DIR ${NUTTX_APPS_DIR}/external/zblue)
+  set(AI_WATCH_BLE_ZBLUE_BIN ${CMAKE_BINARY_DIR}/apps/external/zblue)
+  nuttx_add_library(aiwatch_ble_bridge STATIC)
+  target_sources(aiwatch_ble_bridge PRIVATE ${AI_WATCH_BLE_BRIDGE_SRC})
+  target_include_directories(aiwatch_ble_bridge PRIVATE
+    ${AI_WATCH_BLE_ZBLUE_DIR}/zblue/port/include
+    ${AI_WATCH_BLE_ZBLUE_DIR}/zblue/port/kernel/include
+    ${AI_WATCH_BLE_ZBLUE_BIN}/include
+    ${AI_WATCH_BLE_ZBLUE_BIN}/include/zephyr/sys
+    ${AI_WATCH_BLE_ZBLUE_BIN}/include/zephyr/kernel
+    ${AI_WATCH_BLE_ZBLUE_BIN}/include/zephyr/arch
+    ${AI_WATCH_BLE_ZBLUE_BIN}/include/zephyr/linker
+    ${AI_WATCH_BLE_ZBLUE_BIN}/include/zephyr/devicetree
+    ${AI_WATCH_BLE_ZBLUE_BIN}/include/zephyr/debug
+    ${AI_WATCH_BLE_ZBLUE_BIN}/include/zephyr/fs
+    ${AI_WATCH_BLE_ZBLUE_BIN}/include/zephyr/shell
+    ${AI_WATCH_BLE_ZBLUE_BIN}/include/zephyr/tracing
+    ${AI_WATCH_BLE_ZBLUE_BIN}/include/zephyr/app_memory
+    ${AI_WATCH_BLE_ZBLUE_DIR}/zblue/include
+    ${AI_WATCH_BLE_ZBLUE_DIR}/zblue/subsys/bluetooth
+    ${AI_WATCH_BLE_ZBLUE_DIR}/zblue/subsys/bluetooth/host
+    ${AI_WATCH_BLE_ZBLUE_DIR}/zblue/subsys/settings/include
+    ${AI_WATCH_BLE_ZBLUE_DIR}/zblue/subsys/settings/include/settings
+    ${AI_WATCH_BLE_APP_DIR})
+  add_dependencies(aiwatch_ble_bridge nuttx_context)
+elseif(CONFIG_AI_WATCH_BLE_BRIDGE)
+  message(WARNING
+    "CONFIG_AI_WATCH_BLE_BRIDGE is set but the bridge source or the AI Watch "
+    "app directory was not found:\n"
+    "  bridge src: ${AI_WATCH_BLE_BRIDGE_SRC}\n"
+    "  app dir:    ${AI_WATCH_BLE_APP_DIR}")
+endif()
+
+
 
 target_compile_definitions(arch PRIVATE SOC_BF0_HCPU 
                                         SF32LB52X
