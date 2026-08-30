@@ -160,6 +160,7 @@ struct sf32lb52_bt_priv_s
 };
 
 static int sf32lb52_bt_open(struct bt_driver_s *drv);
+int sf32lb52_bth4_controller_restart(void);
 static int sf32lb52_bt_send(struct bt_driver_s *drv,
                             enum bt_buf_type_e type,
                             void *data, size_t len);
@@ -623,6 +624,42 @@ static int sf32lb52_bt_send(struct bt_driver_s *drv,
     }
 
   return len;
+}
+
+/* Full controller restart used by the Hardware-Error self-heal: power
+ * the LCPU off, re-init the mailbox, re-register the RX callback
+ * (controller_init clears the adapter env) and boot a fresh LCPU
+ * (patch install + RF calibration + ring sync).  After this the
+ * controller answers HCI again and the zblue host can tear itself
+ * down cleanly.  Must run from a context where blocking is OK.
+ */
+int sf32lb52_bth4_controller_restart(void)
+{
+  int ret;
+
+  ret = sf32lb52_bt_controller_deinit();
+  if (ret < 0 && ret != -EPERM)
+    {
+      syslog(LOG_ERR, "sf32lb52 bth4 restart: deinit failed: %d\n", ret);
+      return ret;
+    }
+
+  ret = sf32lb52_bt_controller_init();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "sf32lb52 bth4 restart: init failed: %d\n", ret);
+      return ret;
+    }
+
+  ret = sf32lb52_hci_register_callback(sf32lb52_bt_recv_cb);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "sf32lb52 bth4 restart: register cb failed: %d\n",
+             ret);
+      return ret;
+    }
+
+  return sf32lb52_bt_controller_enable();
 }
 
 static int sf32lb52_bt_ensure_controller_enabled(uint16_t opcode)

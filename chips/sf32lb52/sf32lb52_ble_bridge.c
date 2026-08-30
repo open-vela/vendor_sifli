@@ -596,9 +596,22 @@ void ai_watch_ble_bsp_recover(void)
   g_bridge.last_recover_sec = now.tv_sec;
   syslog(LOG_ERR, "aiwatch-ble: controller hardware error - recovering\n");
 
-  /* 1. Power the LCPU off and drop the adapter to IDLE. */
+  /* 1. Restart the controller: power the LCPU off, re-init the mailbox,
+   *    re-register the RX callback and boot a fresh LCPU (patches + RF
+   *    calibration + ring sync).  After this the controller answers HCI
+   *    again, so the host teardown below completes cleanly. */
 
-  sf32lb52_bt_controller_deinit();
+  {
+    extern int sf32lb52_bth4_controller_restart(void);
+
+    ret = sf32lb52_bth4_controller_restart();
+    if (ret != 0)
+      {
+        syslog(LOG_ERR, "aiwatch-ble: controller restart failed: %d\n",
+               ret);
+      }
+  }
+
   g_bridge.conn = NULL;
   g_bridge.started = false;
   g_bridge.state = AI_WATCH_BLE_BSP_OFF;
