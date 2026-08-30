@@ -588,7 +588,11 @@ void ai_watch_ble_bsp_recover(void)
   int ret;
 
   clock_gettime(CLOCK_MONOTONIC, &now);
-  if (now.tv_sec < g_bridge.last_recover_sec + 10)
+  /* last_recover_sec == 0 means "never recovered" - CLOCK_MONOTONIC
+   * starts at 0, so a plain `now < last + 10` would silently swallow
+   * the first recovery attempt during the first 10s of uptime. */
+  if (g_bridge.last_recover_sec != 0 &&
+      now.tv_sec < g_bridge.last_recover_sec + 10)
     {
       return;                           /* rate limit: one per 10s */
     }
