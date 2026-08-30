@@ -474,13 +474,10 @@ static struct bt_conn_cb g_bridge_conn_cbs =
 
 static void bridge_conn_cb_register(void)
 {
-  static bool registered;
-
-  if (!registered)
-    {
-      bt_conn_cb_register(&g_bridge_conn_cbs);
-      registered = true;
-    }
+  /* Every bt_enable builds a fresh host whose callback list starts
+   * empty (bt_disable_mc -> bt_dev_free wipes conn_ctx), so this must
+   * run once per host generation, NOT once per process. */
+  bt_conn_cb_register(&g_bridge_conn_cbs);
 }
 
 static void bridge_bt_ready(uint8_t dev_id, int err)
@@ -549,6 +546,7 @@ int ai_watch_ble_bsp_start(void)
   if (err != 0)
     {
       BRIDGE_LOG("bt_enable rejected: %d\n", err);
+      g_bridge.started = false;   /* allow a later retry */
       g_bridge.state = AI_WATCH_BLE_BSP_INIT_FAILED;
       return err;
     }
@@ -576,34 +574,42 @@ static void bridge_hw_error_notify(uint8_t dev_id)
 
 bool ai_watch_ble_bsp_take_hw_error(void)
 {
-  bool pending = g_bridge.hw_error_pending;
+  struct timespec now;
+
+  if (!g_bridge.hw_error_pending)
+    {
+      return false;
+    }
+
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  /* Rate limit: last_recover_sec == 0 means "never recovered"
+   * (CLOCK_MONOTONIC starts at 0 - a plain `now < last + 10` would
+   * swallow the first recovery during the first 10s of uptime).  While
+   * gated, the pending flag is PRESERVED so the event is not lost. */
+  if (g_bridge.last_recover_sec != 0 &&
+      now.tv_sec < g_bridge.last_recover_sec + 10)
+    {
+      return false;
+    }
 
   g_bridge.hw_error_pending = false;
-  return pending;
+  g_bridge.last_recover_sec = now.tv_sec;
+  return true;
 }
 
 void ai_watch_ble_bsp_recover(void)
 {
-  struct timespec now;
   int ret;
 
-  clock_gettime(CLOCK_MONOTONIC, &now);
-  /* last_recover_sec == 0 means "never recovered" - CLOCK_MONOTONIC
-   * starts at 0, so a plain `now < last + 10` would silently swallow
-   * the first recovery attempt during the first 10s of uptime. */
-  if (g_bridge.last_recover_sec != 0 &&
-      now.tv_sec < g_bridge.last_recover_sec + 10)
-    {
-      return;                           /* rate limit: one per 10s */
-    }
-
-  g_bridge.last_recover_sec = now.tv_sec;
   syslog(LOG_ERR, "aiwatch-ble: controller hardware error - recovering\n");
 
   /* 1. Restart the controller: power the LCPU off, re-init the mailbox,
    *    re-register the RX callback and boot a fresh LCPU (patches + RF
    *    calibration + ring sync).  After this the controller answers HCI
-   *    again, so the host teardown below completes cleanly. */
+   *    again, so the host teardown below completes cleanly.  Any
+   *    failure here stops the recovery: the host state is undefined
+   *    past this point, and a later Hardware Error (or the Bluetooth
+   *    toggle in Settings) retries the whole sequence. */
 
   {
     extern int sf32lb52_bth4_controller_restart(void);
@@ -613,17 +619,27 @@ void ai_watch_ble_bsp_recover(void)
       {
         syslog(LOG_ERR, "aiwatch-ble: controller restart failed: %d\n",
                ret);
+        g_bridge.started = false;
+        g_bridge.state = AI_WATCH_BLE_BSP_INIT_FAILED;
+        return;
       }
   }
 
-  g_bridge.conn = NULL;
+  /* Drop our connection reference before the host cleanup fires the
+   * disconnected callback (which owns the second unref). */
+
+  if (g_bridge.conn != NULL)
+    {
+      bt_conn_unref(g_bridge.conn);
+      g_bridge.conn = NULL;
+    }
   g_bridge.started = false;
   g_bridge.state = AI_WATCH_BLE_BSP_OFF;
 
-  /* 2. Tear the zblue host down.  Its HCI_RESET goes through the
-   * adapter auto-enable path, which re-boots a fresh LCPU (patches +
-   * RF calibration) before the reset - so the teardown completes
-   * cleanly and the host state is fully released. */
+  /* 2. Tear the zblue host down.  bt_disable_mc force-completes even
+   * when the controller ignores its HCI_RESET (HCI_RESET failure only
+   * logs now), so this returns with the hdev freed and the driver
+   * closed. */
 
   ret = bt_disable_mc(0);
   if (ret != 0)
@@ -631,10 +647,14 @@ void ai_watch_ble_bsp_recover(void)
       syslog(LOG_ERR, "aiwatch-ble: host disable failed: %d\n", ret);
     }
 
-  /* 3. Full bring-up: bt_enable_mc -> bt_ready -> GATT service +
+  /* 3. Full bring-up: bt_enable -> bt_ready -> GATT service +
    * advertising.  The phone's retry loop reconnects on its own. */
 
-  ai_watch_ble_bsp_start();
+  ret = ai_watch_ble_bsp_start();
+  if (ret != 0)
+    {
+      g_bridge.state = AI_WATCH_BLE_BSP_INIT_FAILED;
+    }
 }
 
 bool ai_watch_ble_bsp_take_timesync(

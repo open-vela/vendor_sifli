@@ -6,6 +6,7 @@
 #include <bf0_hal.h>
 #include <bf0_hal_patch.h>
 #include <nuttx/cache.h>
+#include <syslog.h>
 #include <string.h>
 
 #include "mem_map.h"
@@ -137,6 +138,10 @@ static void lcpu_ble_patch_install(void)
 {
   uint8_t rev_id = __HAL_SYSCFG_GET_REVID();
 
+  syslog(LOG_INFO, "lcpu patch: revid=%u -> %s patch\n",
+         (unsigned)rev_id,
+         rev_id < HAL_CHIP_REV_ID_A4 ? "legacy" : "rev_b");
+
   if (rev_id < HAL_CHIP_REV_ID_A4)
     {
 #if !defined(SF32LB52X_REV_B)
@@ -168,6 +173,29 @@ static void lcpu_ble_patch_install(void)
 void lcpu_disable_rf_cal(uint8_t is_disable)
 {
   g_lcpu_rf_cal_disable = is_disable;
+}
+
+/* Dump controller-death evidence before the self-heal clears it: chip
+ * revision (selects the LCPU patch path) and the LCPU assert record at
+ * LCPU_ASSERT_INFO_ADDR / LCPU_CONFIG_START_ADDR (the assert window is
+ * zeroed by HAL_LCPU_ASSERT_INFO_clear at every BT enable).
+ */
+void sf32lb52_lcpu_boot_dump_evidence(void)
+{
+  volatile uint32_t *assert_p = (volatile uint32_t *)0x2040FDA0;
+  volatile uint32_t *cfg_p = (volatile uint32_t *)0x2040FDC0;
+  uint32_t revid = __HAL_SYSCFG_GET_REVID();
+
+  syslog(LOG_ERR,
+         "lcpu evidence: revid=%u (%s patch path) assert_over=%d "
+         "ai=%08x %08x %08x %08x cfg=%08x %08x %08x %08x\n",
+         (unsigned)revid,
+         revid >= HAL_CHIP_REV_ID_A4 ? "rev_b" : "legacy",
+         (int)HAL_LCPU_ASSERT_INFO_get(),
+         (unsigned)assert_p[0], (unsigned)assert_p[1],
+         (unsigned)assert_p[2], (unsigned)assert_p[3],
+         (unsigned)cfg_p[0], (unsigned)cfg_p[1],
+         (unsigned)cfg_p[2], (unsigned)cfg_p[3]);
 }
 
 __WEAK __NOINLINE void lcpu_nvds_config(void)

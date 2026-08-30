@@ -161,6 +161,7 @@ struct sf32lb52_bt_priv_s
 
 static int sf32lb52_bt_open(struct bt_driver_s *drv);
 int sf32lb52_bth4_controller_restart(void);
+void sf32lb52_lcpu_boot_dump_evidence(void);
 static int sf32lb52_bt_send(struct bt_driver_s *drv,
                             enum bt_buf_type_e type,
                             void *data, size_t len);
@@ -636,6 +637,12 @@ static int sf32lb52_bt_send(struct bt_driver_s *drv,
 int sf32lb52_bth4_controller_restart(void)
 {
   int ret;
+
+  /* Capture controller-side evidence BEFORE anything clears it: chip
+   * revision (selects the LCPU patch path) and the LCPU assert record
+   * (HAL_LCPU_ASSERT_INFO is cleared at every enable).  Implemented in
+   * lcpu_boot.c - the only TU with bf0_hal access for these. */
+  sf32lb52_lcpu_boot_dump_evidence();
 
   ret = sf32lb52_bt_controller_deinit();
   if (ret < 0 && ret != -EPERM)
