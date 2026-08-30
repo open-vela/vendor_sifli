@@ -54,6 +54,7 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/uuid.h>
 
+#include "sf32lb52_bt_adapter.h"
 #include "ai_watch_ble_bsp.h"
 
 /****************************************************************************
@@ -133,6 +134,22 @@ static struct
   uint8_t cmdq_len[AI_WATCH_BLE_CMD_QUEUE_LEN];
   volatile uint8_t cmdq_head;           /* writer index */
   volatile uint8_t cmdq_tail;           /* reader index */
+
+  /* Re-advertise backoff. After a failed resume attempt (e.g. the
+   * controller is unresponsive following an HCI Hardware Error) wait
+   * before poking it again: one attempt can block the main loop for
+   * HCI_CMD_TIMEOUT (10s) waiting for a command completion.
+   */
+
+  int resume_failures;                  /* consecutive failed resumes */
+  long resume_retry_after;              /* CLOCK_MONOTONIC sec gate */
+
+  /* Controller hardware-error self-heal: the RX thread sets the flag,
+   * the application main loop performs the recovery (blocking HCI is
+   * safe there). */
+
+  volatile bool hw_error_pending;
+  long last_recover_sec;                /* CLOCK_MONOTONIC sec gate */
 } g_bridge;
 
 /****************************************************************************
@@ -503,6 +520,8 @@ static void bridge_bt_ready(uint8_t dev_id, int err)
  * Public Functions - wrapper implementation (see ai_watch_ble_bsp.h)
  ****************************************************************************/
 
+static void bridge_hw_error_notify(uint8_t dev_id);
+
 int ai_watch_ble_bsp_start(void)
 {
   int err;
@@ -514,6 +533,7 @@ int ai_watch_ble_bsp_start(void)
 
   g_bridge.started = true;
   g_bridge.enabled = true;
+  bt_hci_hw_error_cb_register(bridge_hw_error_notify);
 
   /* Do NOT register conn callbacks here: in this zblue port
    * bt_conn_cb_register_mc() dereferences hdev->conn_ctx, which only
@@ -541,6 +561,63 @@ int ai_watch_ble_bsp_start(void)
 enum ai_watch_ble_bsp_state_e ai_watch_ble_bsp_get_state(void)
 {
   return g_bridge.state;
+}
+
+/* Called by the zblue RX thread when the controller reports a
+ * Hardware Error event (the LCPU bluetooth firmware died).  Only sets
+ * a flag; the recovery itself runs on the application main loop.
+ * Registered in ai_watch_ble_bsp_start().
+ */
+static void bridge_hw_error_notify(uint8_t dev_id)
+{
+  (void)dev_id;
+  g_bridge.hw_error_pending = true;
+}
+
+bool ai_watch_ble_bsp_take_hw_error(void)
+{
+  bool pending = g_bridge.hw_error_pending;
+
+  g_bridge.hw_error_pending = false;
+  return pending;
+}
+
+void ai_watch_ble_bsp_recover(void)
+{
+  struct timespec now;
+  int ret;
+
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  if (now.tv_sec < g_bridge.last_recover_sec + 10)
+    {
+      return;                           /* rate limit: one per 10s */
+    }
+
+  g_bridge.last_recover_sec = now.tv_sec;
+  syslog(LOG_ERR, "aiwatch-ble: controller hardware error - recovering\n");
+
+  /* 1. Power the LCPU off and drop the adapter to IDLE. */
+
+  sf32lb52_bt_controller_deinit();
+  g_bridge.conn = NULL;
+  g_bridge.started = false;
+  g_bridge.state = AI_WATCH_BLE_BSP_OFF;
+
+  /* 2. Tear the zblue host down.  Its HCI_RESET goes through the
+   * adapter auto-enable path, which re-boots a fresh LCPU (patches +
+   * RF calibration) before the reset - so the teardown completes
+   * cleanly and the host state is fully released. */
+
+  ret = bt_disable_mc(0);
+  if (ret != 0)
+    {
+      syslog(LOG_ERR, "aiwatch-ble: host disable failed: %d\n", ret);
+    }
+
+  /* 3. Full bring-up: bt_enable_mc -> bt_ready -> GATT service +
+   * advertising.  The phone's retry loop reconnects on its own. */
+
+  ai_watch_ble_bsp_start();
 }
 
 bool ai_watch_ble_bsp_take_timesync(
@@ -633,24 +710,52 @@ int ai_watch_ble_bsp_notify(uint8_t chr, FAR const void *data,
 
 void ai_watch_ble_bsp_resume_advertising(void)
 {
+  struct timespec now;
+  int err;
+
   if (!g_bridge.enabled || !g_bridge.started ||
       g_bridge.state != AI_WATCH_BLE_BSP_DISCONNECTED)
     {
       return;
     }
 
-  /* A ONE_TIME advertising set is stopped - but not deleted - when a
-   * connection is accepted. bt_le_adv_start() then fails with -EALREADY
-   * for as long as that stale set is registered (adv_create_legacy).
-   * bt_le_adv_stop() takes the delete branch for a set that is no
-   * longer advertising, so clear it before starting fresh.
+  /* Backoff after a failed attempt: a wedged controller makes each
+   * attempt block the main loop for up to HCI_CMD_TIMEOUT.
    */
 
-  bt_le_adv_stop();
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  if (g_bridge.resume_failures > 0 &&
+      now.tv_sec < g_bridge.resume_retry_after)
+    {
+      return;
+    }
 
-  if (bridge_adv_start() == 0)
+  /* A ONE_TIME advertising set is stopped - but not deleted - when a
+   * connection is accepted. bt_le_adv_start() then fails with -EALREADY
+   * for as long as that stale set is registered (adv_create_legacy);
+   * bt_le_adv_stop() takes the delete branch for a set that is no
+   * longer advertising. Try starting directly first so the healthy
+   * path issues no stop command at all; on -EALREADY clear the stale
+   * set and retry. On a controller timeout (-ETIMEDOUT) there is no
+   * set to clean up - do not spend another blocking command on it.
+   */
+
+  err = bridge_adv_start();
+  if (err == -EALREADY)
+    {
+      bt_le_adv_stop();
+      err = bridge_adv_start();
+    }
+
+  if (err == 0)
     {
       g_bridge.state = AI_WATCH_BLE_BSP_ADVERTISING;
+      g_bridge.resume_failures = 0;
+    }
+  else
+    {
+      g_bridge.resume_failures++;
+      g_bridge.resume_retry_after = now.tv_sec + 30;
     }
 }
 
