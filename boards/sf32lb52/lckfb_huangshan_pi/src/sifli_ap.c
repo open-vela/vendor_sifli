@@ -45,6 +45,9 @@
 #include <nuttx/board.h>
 #include <nuttx/lcd/lcd.h>
 #include <nuttx/lcd/lcd_dev.h>
+#if defined(CONFIG_SENSORS_DHTXX)
+#  include <nuttx/sensors/dhtxx.h>
+#endif
 #include <nuttx/timers/pwm.h>
 #include <nuttx/timers/timer.h>
 #include <nuttx/video/fb.h>
@@ -279,6 +282,124 @@ static int sf32lb52_lsm6ds3_initialize(FAR struct i2c_master_s *i2c)
   return OK;
 }
 #endif
+
+#if defined(CONFIG_SENSORS_DHTXX)
+/* DHT22 temperature/humidity sensor on PA20 (30P header pin 24).
+ *
+ * NOTE: PA20's board-default function is the vibration-motor PWM; per
+ * the LCKFB wiki the on-board motor must NOT be soldered/attached when
+ * PA20 is used as a GPIO.
+ *
+ * The single-wire bus idles high and needs a pull-up on the data line:
+ * an external 4.7k-10k to 3V3 is recommended; the internal pull-up is
+ * enabled as a fallback.  The dhtxx driver enforces the 2s sampling
+ * period and parses the DHT22 16-bit x0.1 format including negative
+ * temperatures.
+ */
+
+#define SF32LB52_DHT22_PIN       20
+#define SF32LB52_DHT22_DEVPATH   "/dev/dhtxx0"
+
+static void sf32lb52_dht22_config_data_pin(
+    FAR struct dhtxx_config_s *state, bool mode)
+{
+  GPIO_InitTypeDef init;
+
+  memset(&init, 0, sizeof(init));
+  init.Pin = SF32LB52_DHT22_PIN;
+  init.Mode = mode ? GPIO_MODE_INPUT : GPIO_MODE_OUTPUT;
+  init.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(hwp_gpio1, &init);
+}
+
+static void sf32lb52_dht22_set_data_pin(
+    FAR struct dhtxx_config_s *state, bool value)
+{
+  HAL_GPIO_WritePin(hwp_gpio1, SF32LB52_DHT22_PIN,
+                    value ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+static bool sf32lb52_dht22_read_data_pin(
+    FAR struct dhtxx_config_s *state)
+{
+  return HAL_GPIO_ReadPin(hwp_gpio1, SF32LB52_DHT22_PIN) == GPIO_PIN_SET;
+}
+
+static int64_t sf32lb52_dht22_get_clock(FAR struct dhtxx_config_s *state)
+{
+  /* Microsecond clock for edge timing, built on the Cortex-M33 DWT
+   * cycle counter (same source as HAL_Delay_us on this chip).  The
+   * accumulator keeps deltas wrap-safe across the 32-bit CYCCNT.
+   */
+
+  static uint32_t last_cycles;
+  static int64_t acc_cycles;
+  static int32_t cycles_per_us;
+  static bool started;
+  uint32_t cycles;
+  int32_t delta;
+
+  if (cycles_per_us == 0)
+    {
+      cycles_per_us =
+          (int32_t)(HAL_RCC_GetHCLKFreq(CORE_ID_DEFAULT) / 1000000);
+      if (cycles_per_us <= 0)
+        {
+          cycles_per_us = 128;
+        }
+    }
+
+  if (HAL_DBG_DWT_IsInit() == 0)
+    {
+      HAL_DBG_DWT_Init();
+    }
+
+  cycles = HAL_DBG_DWT_GetCycles();
+  if (!started)
+    {
+      started = true;
+      last_cycles = cycles;
+    }
+
+  delta = (int32_t)(cycles - last_cycles);
+  last_cycles = cycles;
+  acc_cycles += delta;
+
+  return acc_cycles / cycles_per_us;
+}
+
+static int sf32lb52_dht22_initialize(void)
+{
+  static struct dhtxx_config_s dht22_config =
+  {
+    .config_data_pin = sf32lb52_dht22_config_data_pin,
+    .set_data_pin    = sf32lb52_dht22_set_data_pin,
+    .read_data_pin   = sf32lb52_dht22_read_data_pin,
+    .get_clock       = sf32lb52_dht22_get_clock,
+    .type            = DHTXX_DHT22,
+  };
+  int ret;
+
+  HAL_PIN_Set(PAD_PA20, GPIO_A20, PIN_PULLUP, 1);
+
+  /* Idle high between samples */
+
+  sf32lb52_dht22_config_data_pin(&dht22_config, false);
+  sf32lb52_dht22_set_data_pin(&dht22_config, true);
+
+  ret = dhtxx_register(SF32LB52_DHT22_DEVPATH, &dht22_config);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: dhtxx_register(%s) failed: %d\n",
+             SF32LB52_DHT22_DEVPATH, ret);
+      return ret;
+    }
+
+  syslog(LOG_INFO, "INFO: DHT22 registered as %s on PA20\n",
+         SF32LB52_DHT22_DEVPATH);
+  return OK;
+}
+#endif /* CONFIG_SENSORS_DHTXX */
 
 /****************************************************************************
  * Public Functions
@@ -529,6 +650,15 @@ int sf32lb52_lchspi_ulp_bringup(void)
     }
 #endif /* CONFIG_BSP_USING_I2C2 */
 #endif /* CONFIG_I2C */
+
+#if defined(CONFIG_SENSORS_DHTXX)
+  tmpret = sf32lb52_dht22_initialize();
+  if (tmpret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: sf32lb52_dht22_initialize failed: %d\n",
+             tmpret);
+    }
+#endif /* CONFIG_SENSORS_DHTXX */
 
 #if defined(CONFIG_SPI) && defined(CONFIG_BSP_USING_SPI1) && \
     defined(CONFIG_SPI_DRIVER)
