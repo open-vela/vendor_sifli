@@ -10,15 +10,7 @@
 
 #include <sfconfig.h>
 #include "string.h"
-#include "sf32lb_lcd.h"
-
-/* RT-Thread graphic pixel format compatibility */
-#define RTGRAPHIC_PIXEL_FORMAT_RGB565  LCDC_PIXEL_FORMAT_RGB565
-#define RTGRAPHIC_PIXEL_FORMAT_RGB888  LCDC_PIXEL_FORMAT_RGB888
-
-/* Map Kconfig symbols to driver-expected names */
-#define LCD_HOR_RES_MAX  CONFIG_LCD_HOR_RES_MAX
-#define LCD_VER_RES_MAX  CONFIG_LCD_VER_RES_MAX
+#include "drv_lcd.h"
 
 #define DEBUG_PRINTF(...)   lcdinfo(__VA_ARGS__)
 
@@ -112,6 +104,7 @@
 #define REG_WBRIGHT            0x51 /* Write brightness*/
 #define REG_RBRIGHT            0x52 /* Read brightness*/
 #define REG_WRITE_CTRL_DISPLAY 0x53
+
 #define REG_WRHBMDISBV         0x63
 #define REG_SET_DISPLAY_MODE   0xC2
 #define REG_SET_SPI_MODE       0xC4
@@ -411,13 +404,34 @@ static void LCD_WritePixel(LCDC_HandleTypeDef *hlcdc, uint16_t Xpos, uint16_t Yp
 
 static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *hlcdc, const uint8_t *RGBCode, uint16_t Xpos0, uint16_t Ypos0, uint16_t Xpos1, uint16_t Ypos1)
 {
-    HAL_LCDC_LayerSetData(hlcdc, HAL_LCDC_LAYER_DEFAULT, (uint8_t *)RGBCode, Xpos0, Ypos0, Xpos1, Ypos1);
+    HAL_StatusTypeDef status;
 
-    /* Keep transfer interrupt-driven so upper layer timeout can recover
-     * from unexpected LCDC/TE conditions.
-     */
+    /* The LVGL shadow framebuffer may have a wider physical stride than the
+     * dirty rectangle.  sf32lb_lcd_start_xfer publishes that stride in the
+     * layer config; use the HAL extended setter so LCDC walks each source row
+     * without a CPU tight-copy staging buffer. */
+    if (hlcdc->Layer[HAL_LCDC_LAYER_DEFAULT].total_width !=
+        INVALID_TOTAL_WIDTH)
+    {
+        HAL_LCDC_LayerSetDataExt(hlcdc, HAL_LCDC_LAYER_DEFAULT,
+                                 (uint8_t *)RGBCode,
+                                 Xpos0, Ypos0, Xpos1, Ypos1,
+                                 hlcdc->Layer[HAL_LCDC_LAYER_DEFAULT].total_width);
+    }
+    else
+    {
+        HAL_LCDC_LayerSetData(hlcdc, HAL_LCDC_LAYER_DEFAULT,
+                              (uint8_t *)RGBCode,
+                              Xpos0, Ypos0, Xpos1, Ypos1);
+    }
 
-    HAL_LCDC_SendLayerData2Reg_IT(hlcdc, ((0x32 << 24) | (REG_WRITE_RAM << 8)), 4);
+    status = HAL_LCDC_SendLayerData2Reg_IT(hlcdc,
+             ((0x32 << 24) | (REG_WRITE_RAM << 8)), 4);
+    if (status != HAL_OK)
+    {
+        printf("co5300: async submit failed st=%d state=%u area=%u,%u-%u,%u\n",
+               status, hlcdc->State, Xpos0, Ypos0, Xpos1, Ypos1);
+    }
 
 }
 

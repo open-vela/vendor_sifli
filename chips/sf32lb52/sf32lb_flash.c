@@ -29,6 +29,7 @@
 #include "mem_map.h"
 
 #include "bf0_hal_mpi_ex.h"
+#include "flash_table.h"
 #include "dma_config.h"
 
 #include "sf32lb_flash.h"
@@ -43,6 +44,36 @@
 #define SF32LB_NOR_TOTAL_SIZE          (16U * 1024U * 1024U)
 #define SF32LB_NOR_MIN_VALID_SIZE      (2U * 1024U * 1024U)
 #define SF32LB_NOR_CLK_DIV             (2)
+
+#define SF32LB_SFDP_MAGIC              (0x50444653U)
+#define SF32LB_SFDP_BFPT_ID            (0xff00U)
+#define SF32LB_SFDP_MAX_HEADERS        (8U)
+#define SF32LB_SFDP_MAX_BFPT_DWORDS    (20U)
+
+#define SF32LB_SFDP_QER_NONE           (0U)
+#define SF32LB_SFDP_QER_S2B1_V1        (1U)
+#define SF32LB_SFDP_QER_S1B6           (2U)
+#define SF32LB_SFDP_QER_S2B7           (3U)
+#define SF32LB_SFDP_QER_S2B1_V4        (4U)
+#define SF32LB_SFDP_QER_S2B1_V5        (5U)
+#define SF32LB_SFDP_QER_S2B1_V6        (6U)
+
+#define SF32LB_XT25F128F_MANUF_ID       (0x0bU)
+#define SF32LB_XT25F128F_MEM_TYPE       (0x40U)
+#define SF32LB_XT25F128F_DEV_ID         (0x18U)
+#define SF32LB_XT25F128F_DTR_OPCODE     (0xedU)
+#define SF32LB_XT25F128F_DTR_DUMMY      (7U)
+#define SF32LB_XT25F128F_DTR_DIV        (4U)
+#define SF32LB_DTR_VERIFY_WORDS         (4U)
+#define SF32LB_DTR_VERIFY_WINDOWS       (4U)
+
+/* The controller currently has no board-calibrated DTR sampling point.
+ * Keep the implementation available for controlled SRAM-only experiments,
+ * but never enable it in the normal XIP boot path until calibration passes
+ * across voltage, temperature and multiple boards.
+ */
+
+#define SF32LB_FLASH2_DTR_EXPERIMENTAL  (0)
 
 #define SF32LB_NOR_PARENT_FMT          "/dev/config%d"
 
@@ -62,6 +93,20 @@ struct sf32lb_nor_dev_s
   FAR FLASH_HandleTypeDef *spi_flash_handle;
 };
 
+struct sf32lb_sfdp_info_s
+{
+  uint32_t size;
+  uint8_t major;
+  uint8_t minor;
+  uint8_t read_opcode;
+  uint8_t mode_clocks;
+  uint8_t wait_states;
+  uint8_t qer;
+  bool read_144;
+  bool qer_valid;
+  bool dtr_clock;
+};
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -78,6 +123,17 @@ static bool g_flash_hw_initialized;
  ****************************************************************************/
 
 static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void);
+static int SF32LB_FLASH_RAMFUNC
+sf32lb_flash_probe_sfdp(FAR FLASH_HandleTypeDef *hflash,
+                        FAR uint8_t jedec[3],
+                        FAR struct sf32lb_sfdp_info_s *info);
+static int SF32LB_FLASH_RAMFUNC
+sf32lb_flash_enable_quad(FAR FLASH_HandleTypeDef *hflash, uint8_t qer,
+                         FAR uint8_t *sr1_out, FAR uint8_t *sr2_out);
+static int SF32LB_FLASH_RAMFUNC
+sf32lb_flash_try_xt25f128f_dtr(FAR FLASH_HandleTypeDef *hflash,
+                               FAR const uint8_t jedec[3],
+                               FAR const struct sf32lb_sfdp_info_s *sfdp);
 static int sf32lb_nor_sync_geometry(FAR struct sf32lb_nor_dev_s *priv,
                                     bool allow_offset_fallback);
 static bool sf32lb_flash_verify_erased(uint32_t addr, uint32_t size);
@@ -106,15 +162,498 @@ sf32lb_flash_raw_read_range(FAR FLASH_HandleTypeDef *hflash,
  * Private Functions
  ****************************************************************************/
 
-static void sf32lb_flash_cache_invalidate(uint32_t addr, uint32_t size)
+static void SF32LB_FLASH_RAMFUNC
+sf32lb_flash_cache_invalidate(uint32_t addr, uint32_t size)
 {
-#ifdef SCB_InvalidateDCache_by_Addr
   SCB_InvalidateDCache_by_Addr((void *)addr, size);
-#endif
+  __DSB();
+  __ISB();
+}
 
-#ifdef SCB_InvalidateICache_by_Addr
-  SCB_InvalidateICache_by_Addr((void *)addr, size);
-#endif
+static uint32_t SF32LB_FLASH_RAMFUNC
+sf32lb_flash_get_le32(FAR const uint8_t *buf)
+{
+  return (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) |
+         ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
+}
+
+static int SF32LB_FLASH_RAMFUNC
+sf32lb_flash_raw_command_read(FAR FLASH_HandleTypeDef *hflash,
+                              uint8_t opcode, uint32_t addr,
+                              uint8_t addr_size, uint8_t dummy,
+                              FAR uint8_t *out, uint32_t len)
+{
+  uint32_t word;
+  uint32_t i;
+
+  if (hflash == NULL || out == NULL || len == 0 || len > 32)
+    {
+      return -EINVAL;
+    }
+
+  HAL_FLASH_MANUAL_CMD(hflash, 0, 1, dummy, 0, 0,
+                       addr_size, addr_size == 0 ? 0 : 1, 1);
+  HAL_FLASH_WRITE_DLEN(hflash, len);
+  if (HAL_FLASH_SET_CMD(hflash, opcode, addr) != HAL_OK)
+    {
+      return -EIO;
+    }
+
+  for (i = 0; i < len; i += 4)
+    {
+      word = HAL_FLASH_READ32(hflash);
+      out[i] = (uint8_t)word;
+      if (i + 1 < len)
+        {
+          out[i + 1] = (uint8_t)(word >> 8);
+        }
+
+      if (i + 2 < len)
+        {
+          out[i + 2] = (uint8_t)(word >> 16);
+        }
+
+      if (i + 3 < len)
+        {
+          out[i + 3] = (uint8_t)(word >> 24);
+        }
+    }
+
+  return OK;
+}
+
+static int SF32LB_FLASH_RAMFUNC
+sf32lb_flash_sfdp_read(FAR FLASH_HandleTypeDef *hflash, uint32_t addr,
+                       FAR uint8_t *out, uint32_t len)
+{
+  uint32_t chunk;
+  int ret;
+
+  while (len > 0)
+    {
+      chunk = len > 32 ? 32 : len;
+      ret = sf32lb_flash_raw_command_read(hflash, 0x5a, addr, 2, 8,
+                                          out, chunk);
+      if (ret < 0)
+        {
+          return ret;
+        }
+
+      addr += chunk;
+      out += chunk;
+      len -= chunk;
+    }
+
+  return OK;
+}
+
+static int SF32LB_FLASH_RAMFUNC
+sf32lb_flash_probe_sfdp(FAR FLASH_HandleTypeDef *hflash,
+                        FAR uint8_t jedec[3],
+                        FAR struct sf32lb_sfdp_info_s *info)
+{
+  uint8_t header[8 + SF32LB_SFDP_MAX_HEADERS * 8];
+  uint8_t bfpt[SF32LB_SFDP_MAX_BFPT_DWORDS * 4];
+  FAR const uint8_t *ph;
+  uint32_t bfpt_addr = 0;
+  uint32_t density;
+  uint32_t dw1;
+  uint32_t dw3;
+  uint32_t dw15;
+  uint32_t nheaders;
+  uint32_t len_dw = 0;
+  uint32_t i;
+  uint16_t param_id;
+  int ret;
+
+  if (hflash == NULL || jedec == NULL || info == NULL)
+    {
+      return -EINVAL;
+    }
+
+  memset(info, 0, sizeof(*info));
+  ret = sf32lb_flash_raw_command_read(hflash, 0x9f, 0, 0, 0, jedec, 3);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = sf32lb_flash_sfdp_read(hflash, 0, header, 8);
+  if (ret < 0 || sf32lb_flash_get_le32(header) != SF32LB_SFDP_MAGIC ||
+      header[5] == 0 || header[7] != 0xff)
+    {
+      return -ENODEV;
+    }
+
+  info->minor = header[4];
+  info->major = header[5];
+  nheaders = (uint32_t)header[6] + 1;
+  if (nheaders > SF32LB_SFDP_MAX_HEADERS)
+    {
+      nheaders = SF32LB_SFDP_MAX_HEADERS;
+    }
+
+  ret = sf32lb_flash_sfdp_read(hflash, 8, header + 8, nheaders * 8);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  for (i = 0; i < nheaders; i++)
+    {
+      ph = header + 8 + i * 8;
+      param_id = (uint16_t)ph[0] | ((uint16_t)ph[7] << 8);
+      if (param_id == SF32LB_SFDP_BFPT_ID && ph[2] == 1 && ph[3] >= 9)
+        {
+          len_dw = ph[3];
+          bfpt_addr = (uint32_t)ph[4] | ((uint32_t)ph[5] << 8) |
+                      ((uint32_t)ph[6] << 16);
+          info->minor = ph[1];
+          info->major = ph[2];
+          break;
+        }
+    }
+
+  if (len_dw == 0)
+    {
+      return -ENOTSUP;
+    }
+
+  if (len_dw > SF32LB_SFDP_MAX_BFPT_DWORDS)
+    {
+      len_dw = SF32LB_SFDP_MAX_BFPT_DWORDS;
+    }
+
+  ret = sf32lb_flash_sfdp_read(hflash, bfpt_addr, bfpt, len_dw * 4);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  dw1 = sf32lb_flash_get_le32(bfpt);
+  info->dtr_clock = (dw1 & (1U << 19)) != 0;
+  density = sf32lb_flash_get_le32(bfpt + 4);
+  if ((density & 0x80000000U) != 0)
+    {
+      uint32_t exponent = density & 0x7fffffffU;
+
+      if (exponent < 3 || exponent > 34)
+        {
+          return -EFBIG;
+        }
+
+      info->size = exponent >= 32 ? 0xffffffffU : (1U << (exponent - 3));
+    }
+  else
+    {
+      info->size = (uint32_t)(((uint64_t)density + 1U) >> 3);
+    }
+
+  if (info->size < SF32LB_NOR_MIN_VALID_SIZE)
+    {
+      return -EINVAL;
+    }
+
+  if ((dw1 & (1U << 21)) != 0)
+    {
+      dw3 = sf32lb_flash_get_le32(bfpt + 8);
+      info->read_opcode = (uint8_t)(dw3 >> 8);
+      info->mode_clocks = (uint8_t)((dw3 >> 5) & 7);
+      info->wait_states = (uint8_t)(dw3 & 0x1f);
+      info->read_144 = info->read_opcode != 0;
+    }
+
+  if (len_dw >= 15)
+    {
+      dw15 = sf32lb_flash_get_le32(bfpt + 14 * 4);
+      info->qer = (uint8_t)((dw15 >> 20) & 7);
+      info->qer_valid = true;
+    }
+
+  return OK;
+}
+
+static int SF32LB_FLASH_RAMFUNC
+sf32lb_flash_read_status(FAR FLASH_HandleTypeDef *hflash, uint8_t opcode,
+                         FAR uint8_t *value)
+{
+  return sf32lb_flash_raw_command_read(hflash, opcode, 0, 0, 0, value, 1);
+}
+
+static int SF32LB_FLASH_RAMFUNC
+sf32lb_flash_write_status(FAR FLASH_HandleTypeDef *hflash, uint8_t opcode,
+                          uint16_t value, uint8_t len)
+{
+  uint8_t sr1;
+  uint32_t retry;
+
+  if (len == 0 || len > 2)
+    {
+      return -EINVAL;
+    }
+
+  if (sf32lb_flash_issue_raw_cmd(hflash, 0x06) < 0)
+    {
+      return -EIO;
+    }
+
+  HAL_FLASH_MANUAL_CMD(hflash, 1, 1, 0, 0, 0, 0, 0, 1);
+  HAL_FLASH_WRITE_WORD(hflash, value);
+  HAL_FLASH_WRITE_DLEN(hflash, len);
+  if (HAL_FLASH_SET_CMD(hflash, opcode, 0) != HAL_OK)
+    {
+      return -EIO;
+    }
+
+  for (retry = 0; retry < 100000; retry++)
+    {
+      if (sf32lb_flash_read_status(hflash, 0x05, &sr1) < 0)
+        {
+          return -EIO;
+        }
+
+      if ((sr1 & 1) == 0)
+        {
+          return OK;
+        }
+    }
+
+  return -ETIMEDOUT;
+}
+
+static int SF32LB_FLASH_RAMFUNC
+sf32lb_flash_enable_quad(FAR FLASH_HandleTypeDef *hflash, uint8_t qer,
+                         FAR uint8_t *sr1_out, FAR uint8_t *sr2_out)
+{
+  uint8_t sr1;
+  uint8_t sr2 = 0;
+  uint8_t sr2_read = 0x35;
+  uint8_t mask;
+  int ret;
+
+  ret = sf32lb_flash_read_status(hflash, 0x05, &sr1);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  switch (qer)
+    {
+      case SF32LB_SFDP_QER_NONE:
+        break;
+
+      case SF32LB_SFDP_QER_S1B6:
+        if ((sr1 & 0x40) == 0)
+          {
+            ret = sf32lb_flash_write_status(hflash, 0x01, sr1 | 0x40, 1);
+          }
+        break;
+
+      case SF32LB_SFDP_QER_S2B7:
+        sr2_read = 0x3f;
+        ret = sf32lb_flash_read_status(hflash, sr2_read, &sr2);
+        if (ret == OK && (sr2 & 0x80) == 0)
+          {
+            ret = sf32lb_flash_write_status(hflash, 0x3e, sr2 | 0x80, 1);
+          }
+        break;
+
+      case SF32LB_SFDP_QER_S2B1_V1:
+      case SF32LB_SFDP_QER_S2B1_V4:
+      case SF32LB_SFDP_QER_S2B1_V5:
+      case SF32LB_SFDP_QER_S2B1_V6:
+        ret = sf32lb_flash_read_status(hflash, sr2_read, &sr2);
+        if (ret == OK && (sr2 & 0x02) == 0)
+          {
+            if (qer == SF32LB_SFDP_QER_S2B1_V6)
+              {
+                ret = sf32lb_flash_write_status(hflash, 0x31,
+                                                sr2 | 0x02, 1);
+              }
+            else
+              {
+                ret = sf32lb_flash_write_status(hflash, 0x01,
+                    ((uint16_t)(sr2 | 0x02) << 8) | sr1, 2);
+              }
+          }
+        break;
+
+      default:
+        return -ENOTSUP;
+    }
+
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  mask = qer == SF32LB_SFDP_QER_S1B6 ? 0x40 :
+         qer == SF32LB_SFDP_QER_S2B7 ? 0x80 : 0x02;
+  if (qer == SF32LB_SFDP_QER_S1B6)
+    {
+      ret = sf32lb_flash_read_status(hflash, 0x05, &sr1);
+      if (ret == OK && (sr1 & mask) == 0)
+        {
+          ret = -EIO;
+        }
+    }
+  else if (qer != SF32LB_SFDP_QER_NONE)
+    {
+      ret = sf32lb_flash_read_status(hflash, sr2_read, &sr2);
+      if (ret == OK && (sr2 & mask) == 0)
+        {
+          ret = -EIO;
+        }
+    }
+
+  if (sr1_out != NULL)
+    {
+      *sr1_out = sr1;
+    }
+
+  if (sr2_out != NULL)
+    {
+      *sr2_out = sr2;
+    }
+
+  return ret;
+}
+
+static int SF32LB_FLASH_RAMFUNC
+sf32lb_flash_try_xt25f128f_dtr(FAR FLASH_HandleTypeDef *hflash,
+                               FAR const uint8_t jedec[3],
+                               FAR const struct sf32lb_sfdp_info_s *sfdp)
+{
+  uint32_t offsets[SF32LB_DTR_VERIFY_WINDOWS] =
+  {
+    0x000000U, 0x010000U, 0x100000U, 0x7f0000U
+  };
+  uint32_t reference[SF32LB_DTR_VERIFY_WINDOWS][SF32LB_DTR_VERIFY_WORDS];
+  FAR volatile const uint32_t *src;
+  FAR FLASH_CMD_CFG_T *dtr;
+  uint32_t sdr_hcmdr;
+  uint32_t sdr_hrccr;
+  uint32_t sdr_miscr;
+  uint32_t value;
+  uint32_t i;
+  uint32_t j;
+
+  if (hflash == NULL || jedec == NULL || sfdp == NULL || !sfdp->dtr_clock ||
+      jedec[0] != SF32LB_XT25F128F_MANUF_ID ||
+      jedec[1] != SF32LB_XT25F128F_MEM_TYPE ||
+      jedec[2] != SF32LB_XT25F128F_DEV_ID)
+    {
+      return -ENOTSUP;
+    }
+
+  /* JESD216 DW1 advertises DTR clocks but does not provide a portable
+   * 4D-4D command description.  Restrict this path to the data-sheet
+   * verified XT25F128F setup: EDh, DC1=0 and eight physical dummy clocks.
+   * The MPI/SDK command table represents that latency with DCYC=7.
+   */
+
+  for (i = 0; i < SF32LB_DTR_VERIFY_WINDOWS; i++)
+    {
+      src = (FAR volatile const uint32_t *)(hflash->base + offsets[i]);
+      for (j = 0; j < SF32LB_DTR_VERIFY_WORDS; j++)
+        {
+          reference[i][j] = src[j];
+        }
+    }
+
+  sdr_hcmdr = hflash->Instance->HCMDR;
+  sdr_hrccr = hflash->Instance->HRCCR;
+  sdr_miscr = hflash->Instance->MISCR;
+
+  dtr = &g_spi_nor_cmd_table_cache.cmd_cfg[SPI_FLASH_CMD_DTR4R];
+  dtr->cmd = SF32LB_XT25F128F_DTR_OPCODE;
+  dtr->func_mode = 0;
+  dtr->data_mode = 7;
+  dtr->dummy_cycle = SF32LB_XT25F128F_DTR_DUMMY;
+  dtr->ab_size = 0;
+  dtr->ab_mode = 7;
+  dtr->addr_size = 2;
+  dtr->addr_mode = 7;
+  dtr->ins_mode = 1;
+
+  /* The caller has disabled interrupts and this function is in SRAM.  Drop
+   * to DLL2/4 before changing the active XIP read protocol: normally 72 MHz,
+   * or 60 MHz when USB requires a 240 MHz DLL2 source.
+   */
+
+  hflash->Instance->PSCLR = SF32LB_XT25F128F_DTR_DIV;
+  __DSB();
+
+  HAL_FLASH_CFG_AHB_RCMD(hflash, dtr->data_mode, dtr->dummy_cycle,
+                         dtr->ab_size, dtr->ab_mode, dtr->addr_size,
+                         dtr->addr_mode, dtr->ins_mode);
+  HAL_FLASH_SET_AHB_RCMD(hflash, dtr->cmd);
+
+  value = hflash->Instance->MISCR;
+  value |= MPI_MISCR_DTRPRE;
+  value &= ~(MPI_MISCR_RXCLKDLY | MPI_MISCR_SCKDLY |
+             MPI_MISCR_RXCLKINV | MPI_MISCR_SCKINV);
+  value |= 0x0aU << MPI_MISCR_RXCLKDLY_Pos;
+  hflash->Instance->MISCR = value;
+  __DSB();
+  __ISB();
+
+  /* SCB cache maintenance APIs are CMSIS inline functions, not preprocessor
+   * macros.  Do not guard them with #ifdef: doing so silently skipped cache
+   * invalidation and made DTR verification compare stale SDR cache lines.
+   * Drop all cached XIP instructions before any return to flash code.
+   */
+
+  SCB_InvalidateICache();
+  __DSB();
+  __ISB();
+
+  for (i = 0; i < SF32LB_DTR_VERIFY_WINDOWS; i++)
+    {
+      sf32lb_flash_cache_invalidate(hflash->base + offsets[i],
+                                    sizeof(reference[i]));
+      src = (FAR volatile const uint32_t *)(hflash->base + offsets[i]);
+      for (j = 0; j < SF32LB_DTR_VERIFY_WORDS; j++)
+        {
+          if (src[j] != reference[i][j])
+            {
+              /* Restore the complete known-good SDR register image while
+               * retaining divider four.  Confirm SDR before returning to
+               * any XIP-resident caller.
+               */
+
+              hflash->Instance->MISCR = sdr_miscr;
+              hflash->Instance->HRCCR = sdr_hrccr;
+              hflash->Instance->HCMDR = sdr_hcmdr;
+              __DSB();
+              __ISB();
+
+              SCB_InvalidateICache();
+              __DSB();
+              __ISB();
+
+              sf32lb_flash_cache_invalidate(hflash->base + offsets[i],
+                                            sizeof(reference[i]));
+              src = (FAR volatile const uint32_t *)
+                    (hflash->base + offsets[i]);
+              for (j = 0; j < SF32LB_DTR_VERIFY_WORDS; j++)
+                {
+                  if (src[j] != reference[i][j])
+                    {
+                      for (; ; )
+                        {
+                        }
+                    }
+                }
+
+              hflash->buf_mode = 0;
+              return -EIO;
+            }
+        }
+    }
+
+  hflash->buf_mode = 1;
+  return OK;
 }
 
 static int sf32lb_flash_hw_init(void)
@@ -122,6 +661,7 @@ static int sf32lb_flash_hw_init(void)
   HAL_StatusTypeDef status;
   qspi_configure_t flash_cfg;
   uintptr_t pc;
+  int ret;
 #ifdef CONFIG_BSP_QSPI2_USING_DMA
   struct dma_config flash_dma;
 #endif
@@ -140,9 +680,22 @@ static int sf32lb_flash_hw_init(void)
   pc = (uintptr_t)&sf32lb_flash_hw_init;
   if (pc >= FLASH2_BASE_ADDR && pc < (FLASH2_BASE_ADDR + SF32LB_NOR_TOTAL_SIZE))
     {
-      g_flash_hw_initialized = false;
-      syslog(LOG_WARNING,
-             "WARN: skip HAL_FLASH_Init during XIP bringup, NOR write/erase disabled\n");
+      /* HAL_FLASH_Init cannot safely run while executing from FLASH2.  The
+       * runtime preinit and MPI/NOR command functions are linked into SRAM,
+       * so use that path to identify the device, set QE, and atomically
+       * change the AHB XIP command to SDK's 0xeb 1-4-4 read configuration.
+       */
+
+      ret = sf32lb_flash_preinit_runtime();
+      if (ret < 0)
+        {
+          syslog(LOG_ERR,
+                 "ERROR: FLASH2 XIP Quad initialization failed: %d\n", ret);
+          return ret;
+        }
+
+      syslog(LOG_INFO,
+             "FLASH2 XIP initialized from JEDEC/SFDP parameters\n");
       return OK;
     }
 
@@ -181,9 +734,16 @@ static int sf32lb_flash_hw_init(void)
 static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void)
 {
   FAR FLASH_HandleTypeDef *hflash;
+  FAR const SPI_FLASH_FACT_CFG_T *template;
+  struct sf32lb_sfdp_info_s sfdp;
   HAL_StatusTypeDef status;
   irqstate_t flags;
   uint32_t detected_size;
+  uint8_t jedec[3];
+  uint8_t sr1;
+  uint8_t sr2;
+  int dtr_ret;
+  int sfdp_ret;
 
   if (g_flash_hw_initialized)
     {
@@ -199,23 +759,44 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void)
   hflash->base = FLASH2_BASE_ADDR;
   hflash->size = SF32LB_NOR_TOTAL_SIZE;
   hflash->freq = 24000000;
+  hflash->Mode = HAL_FLASH_NOR_MODE;
+  hflash->isNand = 0;
+  hflash->dma = NULL;
 
   sf32lb_flash_lock();
   flags = up_irq_save();
-  status = HAL_FLASH_PreInit(hflash);
+  sfdp_ret = sf32lb_flash_probe_sfdp(hflash, jedec, &sfdp);
+  status = sfdp_ret < 0 ? HAL_FLASH_PreInit(hflash) : HAL_OK;
   up_irq_restore(flags);
   sf32lb_flash_unlock();
 
-  if (status != HAL_OK)
+  if (sfdp_ret < 0)
     {
-      syslog(LOG_ERR, "ERROR: NOR runtime preinit failed: %d\n", status);
-      return -EIO;
+      syslog(LOG_ERR, "ERROR: FLASH2 SFDP probe failed: %d\n", sfdp_ret);
+      if (status != HAL_OK)
+        {
+          return -ENODEV;
+        }
     }
 
-  if (hflash->ctable == NULL)
+  if (sfdp_ret < 0 && hflash->ctable != NULL)
     {
-      syslog(LOG_ERR, "ERROR: NOR runtime preinit missing command table\n");
-      return -EIO;
+      template = hflash->ctable;
+    }
+  else
+    {
+      /* Do not call HAL_FLASH_PreInit() after a successful SFDP probe: it
+       * clears protection bits using a vendor command table before QER is
+       * known.  Use the SDK table only as a command template and obtain
+       * device-specific read timing and capacity from SFDP below.  The SDK
+       * API returns its conservative type-0 table for unknown JEDEC IDs.
+       */
+
+      template = spi_flash_get_cmd_by_id(jedec[0], jedec[2], jedec[1]);
+      if (template == NULL)
+        {
+          return -ENODEV;
+        }
     }
 
   /* HAL stores command table in const rodata, which can live in XIP flash.
@@ -223,22 +804,132 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void)
    * can break status polling.  Keep a SRAM copy for runtime commands.
    */
 
-  memcpy(&g_spi_nor_cmd_table_cache, hflash->ctable,
+  memcpy(&g_spi_nor_cmd_table_cache, template,
          sizeof(g_spi_nor_cmd_table_cache));
   hflash->ctable = &g_spi_nor_cmd_table_cache;
 
-  /* Exit potential vendor continuous-read state before write/erase. */
+  if (sfdp_ret == OK)
+    {
+      hflash->size = sfdp.size;
+      g_spi_nor_cmd_table_cache.manuf_id = jedec[0];
+      g_spi_nor_cmd_table_cache.mem_type = jedec[1];
+      g_spi_nor_cmd_table_cache.dev_id = jedec[2];
 
-  HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RST_EN, 0);
-  HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RST, 0);
-  HAL_Delay_us(30);
+      if (sfdp.read_144)
+        {
+          FAR FLASH_CMD_CFG_T *quad;
 
-  /* Board flash2 uses 4-line SPI in normal runtime (line=2 in board init).
-   * HAL_FLASH_PreInit forces Mode=0; restore quad mode explicitly.
+          quad = &g_spi_nor_cmd_table_cache.cmd_cfg[SPI_FLASH_CMD_4READ];
+          quad->cmd = sfdp.read_opcode;
+          quad->data_mode = 3;
+          quad->dummy_cycle = sfdp.wait_states;
+          quad->ab_size = sfdp.mode_clocks == 0 ? 0 :
+                          (sfdp.mode_clocks / 2) - 1;
+          quad->ab_mode = sfdp.mode_clocks == 0 ? 0 : 3;
+          quad->addr_size = 2;
+          quad->addr_mode = 3;
+          quad->ins_mode = 1;
+        }
+    }
+
+  if (sfdp_ret < 0 || !sfdp.read_144 || !sfdp.qer_valid ||
+      (sfdp.mode_clocks != 0 && (sfdp.mode_clocks & 1) != 0))
+    {
+      syslog(LOG_WARNING,
+             "WARN: FLASH2 has no safely usable SFDP 1-4-4 mode; "
+             "keeping 0x0b\n");
+      hflash->Mode = HAL_FLASH_NOR_MODE;
+      HAL_FLASH_CONFIG_AHB_READ(hflash, false);
+      g_flash_hw_initialized = true;
+      return OK;
+    }
+
+  if (hflash->size > NOR_FLASH_MAX_3B_SIZE)
+    {
+      syslog(LOG_ERR,
+             "ERROR: SFDP Flash size %lu needs unsupported 4-byte setup\n",
+             (unsigned long)hflash->size);
+      hflash->Mode = HAL_FLASH_NOR_MODE;
+      HAL_FLASH_CONFIG_AHB_READ(hflash, false);
+      g_flash_hw_initialized = true;
+      return OK;
+    }
+
+  /* Apply the SFDP QER procedure and switch AHB XIP from 0x0b 1-1-1 to
+   * the discovered 1-4-4 command.  Do not issue 66h/99h here: reset
+   * support is described separately in BFPT DW16 and is not universal.
+   * No interrupt may fetch from FLASH2 while the protocol is changing.
+   * Keep this complete critical sequence in SRAM; use a local delay loop
+   * instead of the XIP-resident HAL_Delay_us().
    */
 
+  sf32lb_flash_lock();
+  flags = up_irq_save();
+  status = sf32lb_flash_enable_quad(hflash, sfdp.qer, &sr1, &sr2);
+  if (status != OK)
+    {
+      hflash->Mode = HAL_FLASH_NOR_MODE;
+      HAL_FLASH_CONFIG_AHB_READ(hflash, false);
+      up_irq_restore(flags);
+      sf32lb_flash_unlock();
+      syslog(LOG_ERR,
+             "ERROR: SFDP QER %u failed (%d), SR1=%02x SR2=%02x; "
+             "restored 0x0b\n", sfdp.qer, status, sr1, sr2);
+      return -EIO;
+    }
+
   hflash->Mode = HAL_FLASH_QMODE;
-  HAL_FLASH_SET_QUAL_SPI(hflash, true);
+  HAL_FLASH_CONFIG_AHB_READ(hflash, true);
+  HAL_FLASH_ENABLE_QSPI(hflash, 1);
+
+  if (SF32LB_FLASH2_DTR_EXPERIMENTAL != 0)
+    {
+      dtr_ret = sf32lb_flash_try_xt25f128f_dtr(hflash, jedec, &sfdp);
+    }
+  else
+    {
+      dtr_ret = -ENOTSUP;
+    }
+
+  up_irq_restore(flags);
+  sf32lb_flash_unlock();
+
+  syslog(LOG_INFO,
+      "FLASH2 SFDP %u.%u: JEDEC=%02x %02x %02x size=%lu "
+      "1-4-4 cmd=%02x mode=%u wait=%u QER=%u SR1=%02x SR2=%02x "
+      "HCMDR=%08lx HRCCR=%08lx\n",
+      sfdp.major, sfdp.minor,
+      hflash->ctable->manuf_id, hflash->ctable->mem_type,
+      hflash->ctable->dev_id, (unsigned long)hflash->size,
+      sfdp.read_opcode, sfdp.mode_clocks, sfdp.wait_states, sfdp.qer,
+      sr1, sr2,
+      (unsigned long)hflash->Instance->HCMDR,
+      (unsigned long)hflash->Instance->HRCCR);
+
+  if (dtr_ret == OK)
+    {
+      syslog(LOG_INFO,
+             "FLASH2 DTR enabled: cmd=ed physical-dummy=8 div=%lu "
+             "HCMDR=%08lx HRCCR=%08lx MISCR=%08lx\n",
+             (unsigned long)(hflash->Instance->PSCLR & MPI_PSCLR_DIV_Msk),
+             (unsigned long)hflash->Instance->HCMDR,
+             (unsigned long)hflash->Instance->HRCCR,
+             (unsigned long)hflash->Instance->MISCR);
+    }
+  else if (dtr_ret == -EIO)
+    {
+      syslog(LOG_WARNING,
+             "WARN: FLASH2 DTR verification failed; restored 0xeb SDR "
+             "at div=%lu\n",
+             (unsigned long)(hflash->Instance->PSCLR & MPI_PSCLR_DIV_Msk));
+    }
+  else
+    {
+      syslog(LOG_INFO,
+             "FLASH2 DTR skipped: no verified JEDEC/SFDP configuration; "
+             "keeping SDR at div=%lu\n",
+             (unsigned long)(hflash->Instance->PSCLR & MPI_PSCLR_DIV_Msk));
+    }
 
   /* HAL_FLASH_PreInit sets hflash->dma = NULL but HAL_QSPIEX_WRITE_PAGE
    * requires DMA for reliable page-program operations.  Configure DMA

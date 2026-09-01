@@ -12,6 +12,10 @@ if SIFLI_LCD
         bool
         default n
 
+    config LCD_USING_EPD_SPI
+        bool
+        default n
+
     config BSP_LCDC_USING_SPI_NODCX_1DATA
         def_bool n 
     config BSP_LCDC_USING_SPI_NODCX_2DATA
@@ -81,23 +85,104 @@ if SIFLI_LCD
                     default n
             endif
 
+            config LCD_USING_SF32LB52_EPD
+                bool "528x792 SPI E-Paper Display"
+                select LCD_USING_EPD_SPI
+                select BSP_LCDC_USING_SPI_DCX_1DATA
+                select BSP_USING_RECT_TYPE_LCD
+
     endchoice
 
     config LCD_HOR_RES_MAX
         int
         default 368 if LCD_USING_ED_LB55BILI8688E
         default 390 if LCD_USING_CO5300
+        default 528 if LCD_USING_SF32LB52_EPD
 
         
     config LCD_VER_RES_MAX
         int
         default 448 if LCD_USING_ED_LB55BILI8688E
         default 450 if LCD_USING_CO5300
+        default 792 if LCD_USING_SF32LB52_EPD
 
 
     config LCD_DPI
         int
         default 315 if LCD_USING_ED_LB55BILI8688E
         default 315 if LCD_USING_CO5300
+        default 160 if LCD_USING_SF32LB52_EPD
+
+    menu "LVGL&LCD framebuffer configuration"
+
+        config BSP_USING_LCD_FRAMEBUFFER
+            bool "Enable SiFli LCDC framebuffer manager"
+            default n
+            help
+                Enable the driver-side framebuffer manager used by LVGL partial
+                rendering. This mirrors the RT drv_lcd_fb.c path.
+
+        config DRV_LCD_COMPRESSED_BUF_AVALIABLE
+            bool
+            default y if BSP_USING_EXT_DMA
+
+        comment "------------1. Config LCD framebuffer on PSRAM-----------"
+
+        choice
+            prompt "LCD Framebuffer config"
+            default LCD_FB_USING_TWO_UNCOMPRESSED
+            help
+                LCD framebuffer is used to buffer the LVGL framebuffer and
+                retain the full image of the LCD screen. This prevents tearing
+                caused by slow rendering.
+
+            config LCD_FB_USING_ONE_UNCOMPRESSED
+                bool "One screen sized buffer"
+                select BSP_USING_LCD_FRAMEBUFFER
+
+            config LCD_FB_USING_TWO_UNCOMPRESSED
+                bool "Two screen sized buffer for ramless LCD typically"
+                select BSP_USING_LCD_FRAMEBUFFER
+
+            config LCD_FB_USING_ONE_COMPRESSED
+                bool "One screen sized compressed buffer"
+                select BSP_USING_LCD_FRAMEBUFFER
+                depends on DRV_LCD_COMPRESSED_BUF_AVALIABLE
+
+            config LCD_FB_USING_TWO_COMPRESSED
+                bool "Two screen sized compressed buffer for ramless LCD typically"
+                select BSP_USING_LCD_FRAMEBUFFER
+                depends on DRV_LCD_COMPRESSED_BUF_AVALIABLE
+
+            config LCD_FB_USING_NONE
+                bool "No Framebuffer, flush LVGL buffer to LCD directly"
+        endchoice
+
+        comment "------------2. Config LVGL framebuffer on SRAM-----------"
+
+        choice
+            prompt "LVGL Framebuffer config"
+            default LV_FB_ONE_NOT_SCREEN_SIZE
+
+            config LV_FB_ONE_SCREEN_SIZE
+                bool "One screen sized framebuffer"
+                select BSP_USING_LCD_FRAMEBUFFER
+
+            config LV_FB_TWO_SCREEN_SIZE
+                bool "TWO screen sized framebuffer"
+
+            config LV_FB_ONE_NOT_SCREEN_SIZE
+                bool "One part of framebuffer (1*LV_FB_LINE_NUM)"
+
+            config LV_FB_TWO_NOT_SCREEN_SIZE
+                bool "Two part of framebuffer (2*LV_FB_LINE_NUM)"
+        endchoice
+
+        config LV_FB_LINE_NUM
+            int "LVGL Frame Buffer Line Number(LV_FB_LINE_NUM)"
+            depends on LV_FB_ONE_NOT_SCREEN_SIZE || LV_FB_TWO_NOT_SCREEN_SIZE
+            default 100
+
+    endmenu
 
 endif

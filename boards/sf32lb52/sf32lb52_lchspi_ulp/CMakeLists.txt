@@ -26,3 +26,11 @@ file(GLOB EXTRA_LIBS
 set_property(GLOBAL APPEND PROPERTY NUTTX_EXTRA_LIBRARIES ${EXTRA_LIBS})
 
 set_property(GLOBAL PROPERTY LD_SCRIPT ${NUTTX_BOARD_ABS_DIR}/scripts/ld.script)
+
+set(SIFLI_LVGL_HOOK
+    ${NUTTX_BOARD_ABS_DIR}/../../../apps/graphics/lvgl/CMakeLists.txt
+    CACHE INTERNAL "SiFli LVGL hook")
+if(EXISTS "${SIFLI_LVGL_HOOK}")
+  cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL include
+                 "${SIFLI_LVGL_HOOK}")
+endif()

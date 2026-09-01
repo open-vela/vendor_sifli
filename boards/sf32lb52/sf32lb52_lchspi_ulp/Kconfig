@@ -1,0 +1,8 @@
+config LV_USE_SIFLI_EPIC_IMAGE_SRAM_STAGE
+	bool "Stage immutable SiFli EPIC images in SRAM"
+	depends on LV_USE_SIFLI_EPIC
+	default y
+	help
+	  Copy supported immutable RGB565/RGB565A8 variable images to an internal
+	  SRAM staging buffer before EPIC drawing. This also enables transformed
+	  RGB565A8 images to use EPIC instead of the software fallback.

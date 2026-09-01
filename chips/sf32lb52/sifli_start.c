@@ -28,6 +28,7 @@
 #include <stdio.h>
 
 #include <nuttx/arch.h>
+#include <nuttx/clock.h>
 #include <nuttx/init.h>
 #include <nuttx/cache.h>
 
@@ -52,6 +53,11 @@
 extern uint32_t _siramfunc;
 extern uint32_t _sramfunc;
 extern uint32_t _eramfunc;
+#ifdef CONFIG_SF32LB52_PSRAM_TEXT_TEST
+extern uint32_t _sipsramtext;
+extern uint32_t _spsramtext;
+extern uint32_t _epsramtext;
+#endif
 
 void arm_lowputs(const char *str)
 {
@@ -95,6 +101,11 @@ int sifli_arch_syslog(int priority, const char *fmt, ...)
   arm_lowputs(buf);
 
   return ret;
+}
+
+uint32_t HAL_GetTick(void)
+{
+  return (uint32_t)TICK2MSEC(clock_systime_ticks());
 }
 
 #ifdef CONFIG_DEBUG_FEATURES
@@ -211,6 +222,23 @@ void __start(void)
    */
   HAL_Init();
     arm_lowputc('C'); /* HAL init done */
+
+#ifdef CONFIG_SF32LB52_PSRAM_TEXT_TEST
+  /* PSRAM is initialized by HAL_PreInit() from HAL_Init().  Relocate the
+   * diagnostic LVGL text only after that point; the boot/startup path itself
+   * stays in NOR and remains executable during early initialization. */
+  for (src = (const uint32_t *)&_sipsramtext,
+       dest = (uint32_t *)&_spsramtext; dest < (uint32_t *)&_epsramtext; )
+    {
+      *dest++ = *src++;
+    }
+  /* The copy runs with the data cache enabled.  Make the copied instructions
+   * visible to the instruction side before any PSRAM call can be reached. */
+  SCB_CleanDCache();
+  SCB_InvalidateICache();
+  __DSB();
+  __ISB();
+#endif
 
   /* Disable SysTick that was enabled by HAL_Init().
    * NuttX uses its own timer system (LPTIM for tickless mode).

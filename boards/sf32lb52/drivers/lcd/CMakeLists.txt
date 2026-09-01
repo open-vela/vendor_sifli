@@ -21,11 +21,26 @@
 set(SRCS)
 
 if(CONFIG_LCD)
-  list(APPEND SRCS sf32lb_lcd.c)
+  list(APPEND SRCS drv_lcd.c)
+  list(APPEND SRCS drv_lcd_private.c)
+
+  if(CONFIG_BSP_USING_LCD_FRAMEBUFFER)
+    list(APPEND SRCS drv_lcd_fb.c)
+    list(APPEND SRCS drv_ext_dma.c)
+    if(CONFIG_BSP_USING_EPIC AND CONFIG_LV_USE_SIFLI_EPIC)
+      list(APPEND SRCS drv_epic.c)
+    endif()
+    # drv_dma.c is intentionally excluded. Framebuffer copies use EXTDMA
+    # through drv_ext_dma.c and EPIC through LVGL's shared EPIC backend.
+  endif()
 endif()
 
 if(CONFIG_LCD_USING_CO5300)
   list(APPEND SRCS co5300.c)
+endif()
+
+if(CONFIG_LCD_USING_EPD_SPI)
+  list(APPEND SRCS epd_spi.c)
 endif()
 
 if(CONFIG_LCD_USING_ILI8688E)
@@ -42,6 +57,10 @@ target_include_directories(drivers PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 if(CONFIG_LCD_USING_CO5300)
   target_link_options(drivers PRIVATE -u __lcddriver_co5300)
+endif()
+
+if(CONFIG_LCD_USING_EPD_SPI)
+  target_link_options(drivers PRIVATE -u __lcddriver_epd_spi)
 endif()
 
 if(CONFIG_LCD_USING_ILI8688E)

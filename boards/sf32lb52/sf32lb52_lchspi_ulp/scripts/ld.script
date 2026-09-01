@@ -18,6 +18,8 @@
  *
  ****************************************************************************/
 
+#include <nuttx/config.h> /* PSRAM text A/B is disabled in the production image */
+
 MEMORY
 {
   flash (rx) : ORIGIN = 0x12010000, LENGTH = 16M
@@ -38,11 +40,28 @@ SECTIONS
         *(.note.gnu.build-id)
     }
 
-    .text : {
+    .vectors : {
         _stext = ABSOLUTE(.);
-        /* Ensure vector table is properly aligned (must be at flash start) */
         . = ALIGN(512);
         KEEP(*(.vectors))
+    } > flash
+
+#ifdef CONFIG_SF32LB52_PSRAM_TEXT_TEST
+    /* Diagnostic A/B: place the LVGL software draw-unit code and its local
+     * literal pools in PSRAM.  The load image remains in NOR; sifli_start.c
+     * copies this section after HAL_PreInit has initialized PSRAM. */
+    .psram_text ORIGIN(psram) : ALIGN(4)
+    {
+        _spsramtext = ABSOLUTE(.);
+        lv_draw_sw*.o(.text .text.* .rodata .rodata.*
+                      .ARM.extab* .ARM.exidx*)
+        . = ALIGN(4);
+        _epsramtext = ABSOLUTE(.);
+    } > psram AT > flash
+    _sipsramtext = LOADADDR(.psram_text);
+#endif
+
+    .text : {
         /* Add padding after vectors to match SDK layout */
         . = ALIGN(4);
         *(.text .text.*)
@@ -108,12 +127,12 @@ SECTIONS
     } > flash
 
     .ARM.extab : {
-        *(.ARM.extab*)
+        *(EXCLUDE_FILE (lv_draw_sw*.o) .ARM.extab*)
     } > flash
 
     __exidx_start = ABSOLUTE(.);
     .ARM.exidx : {
-        *(.ARM.exidx*)
+        *(EXCLUDE_FILE (lv_draw_sw*.o) .ARM.exidx*)
     } > flash
     __exidx_end = ABSOLUTE(.);
 
@@ -154,6 +173,16 @@ SECTIONS
     .ram_vectors : {
         *(.ram_vectors)
     } > sram
+
+    /* Static LVGL/LCDC framebuffer storage lives in PSRAM.  It is NOLOAD;
+     * lv_lcd_init() clears it after PSRAM has been initialized. */
+    .psram_bss (NOLOAD) : ALIGN(64)
+    {
+        _spsrambss = ABSOLUTE(.);
+        KEEP(*(.psram_bss*))
+        . = ALIGN(64);
+        _epsrambss = ABSOLUTE(.);
+    } > psram
 
     .data : {
         _sdata = ABSOLUTE(.);

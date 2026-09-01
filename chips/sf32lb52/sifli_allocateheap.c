@@ -36,14 +36,17 @@ extern void BSP_PIN_Init(void);
 extern void BSP_Power_Up(bool is_deep_sleep);
 extern void BSP_Board_PreInit(void);
 
+/* Reserved by the board linker script for static PSRAM framebuffers. */
+extern uint8_t _epsrambss __attribute__((weak));
+
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
 
 /* SRAM memory configuration for SF32LB52 */
 
-#define SRAM_START  0x20000000
-#define SRAM_SIZE   0x00080000    /* 512 KB */
+#define SRAM_START  HCPU_RAM_DATA_START_ADDR
+#define SRAM_SIZE   HCPU_RAM_DATA_SIZE
 #define SRAM_END    (SRAM_START + SRAM_SIZE)
 
 /* PSRAM memory configuration for SF32LB52 (MPI1 SBUS) */
@@ -77,9 +80,9 @@ static void sifli_psram_preinit(void)
 
   HAL_PMU_ConfigPeriLdo(PMU_PERI_LDO_1V8, true, true);
 
-  /* Use SYSCLK for early boot safety. DLL2 path is enabled later by HAL. */
+  /* BSP_Board_PreInit has enabled DLL2; match the validated RT PSRAM path. */
 
-  HAL_RCC_HCPU_ClockSelect(RCC_CLK_MOD_FLASH1, RCC_CLK_FLASH_SYSCLK);
+  HAL_RCC_HCPU_ClockSelect(RCC_CLK_MOD_FLASH1, RCC_CLK_FLASH_DLL2);
 
   /* Use configured PSRAM mode directly to avoid early-boot PID dependency. */
 
@@ -181,7 +184,23 @@ void arm_addregion(void)
 #ifdef CONFIG_BSP_USING_PSRAM
   if (g_psram_ready)
     {
-      kumm_addregion((void *)PSRAM_START, PSRAM_SIZE);
+      uintptr_t heap_start = (uintptr_t)&_epsrambss;
+      uintptr_t psram_end = PSRAM_START + PSRAM_SIZE;
+
+      if (heap_start < PSRAM_START)
+        {
+          heap_start = PSRAM_START;
+        }
+      else if (heap_start >= psram_end)
+        {
+          return;
+        }
+
+      heap_start = (heap_start + 63) & ~((uintptr_t)63);
+      if (heap_start < psram_end)
+        {
+          kumm_addregion((void *)heap_start, psram_end - heap_start);
+        }
     }
 #endif
 }

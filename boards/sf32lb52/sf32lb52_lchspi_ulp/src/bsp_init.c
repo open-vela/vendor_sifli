@@ -7,6 +7,8 @@
 #include "bsp_board.h"
 #include "bf0_hal_rtc.h"
 
+#include <stdio.h>
+
 #ifndef LXT_LP_CYCLE
     #define LXT_LP_CYCLE 200
 #endif
@@ -172,6 +174,21 @@ void BSP_Board_PreInit(void)
     HAL_Delay_us(0);
     //HAL_sw_breakpoint();
 
+    /* NuttX executes directly from NOR on MPI2 (0x12000000).  Set the
+     * divider before switching the source.  DLL2/3 gives 96 MHz normally,
+     * or 80 MHz when USB requires DLL2 to run at 240 MHz.  Both are within
+     * the 104 MHz limit of the XT25F128F 0xeb SDR mode with six total
+     * latency clocks.  The old early return skipped this SDK clock setup
+     * and left XIP on the 48 MHz source with divider 2 (about 24 MHz).
+     */
+
+    mpi2_div = 3;
+    hwp_qspi2->PSCLR = mpi2_div;
+    __DSB();
+    HAL_RCC_HCPU_ClockSelect(RCC_CLK_MOD_FLASH2, RCC_CLK_FLASH_DLL2);
+    __DSB();
+    __ISB();
+
     /* In NuttX flow, chip layer will handle pin/PSRAM/flash early init. */
     return;
 
@@ -241,5 +258,142 @@ void BSP_IO_Init(void)
 __WEAK void SystemClock_Config(void)
 {
 
+}
+
+static void sf32lb52_cache_dump(void)
+{
+#if defined(SOC_BF0_HCPU) && defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
+#define SF32LB52_SCB_CACR         (*(volatile uint32_t *)0xe000ef9cu)
+#define SF32LB52_SCB_CACR_FORCEWT (1u << 2)
+    uint32_t ccsidr;
+    uint32_t csselr;
+    uint32_t line_size;
+    uint32_t sets;
+    uint32_t ways;
+    uint32_t regions;
+    uint32_t rnr;
+
+    csselr = SCB->CSSELR;
+    SCB->CSSELR = 0; /* Level 1 data/unified cache */
+    __DSB();
+    ccsidr = SCB->CCSIDR;
+    SCB->CSSELR = csselr;
+    __DSB();
+    __ISB();
+
+    line_size = 1u << (((ccsidr & SCB_CCSIDR_LINESIZE_Msk) >>
+                        SCB_CCSIDR_LINESIZE_Pos) + 4u);
+    sets = ((ccsidr & SCB_CCSIDR_NUMSETS_Msk) >>
+            SCB_CCSIDR_NUMSETS_Pos) + 1u;
+    ways = ((ccsidr & SCB_CCSIDR_ASSOCIATIVITY_Msk) >>
+            SCB_CCSIDR_ASSOCIATIVITY_Pos) + 1u;
+
+    printf("[sf32lb52-cache] CCR=0x%08lx CACR=0x%08lx CTR=0x%08lx "
+           "I=%lu D=%lu FORCEWT=%lu\n",
+        (unsigned long)SCB->CCR,
+        (unsigned long)SF32LB52_SCB_CACR,
+        (unsigned long)SCB->CTR,
+        (unsigned long)((SCB->CCR & SCB_CCR_IC_Msk) != 0),
+        (unsigned long)((SCB->CCR & SCB_CCR_DC_Msk) != 0),
+        (unsigned long)((SF32LB52_SCB_CACR &
+                 SF32LB52_SCB_CACR_FORCEWT) != 0));
+    printf("[sf32lb52-cache] D-CCSIDR=0x%08lx line=%lu sets=%lu ways=%lu "
+           "size=%lu bytes WT=%lu WB=%lu RA=%lu WA=%lu\n",
+        (unsigned long)ccsidr,
+        (unsigned long)line_size,
+        (unsigned long)sets,
+        (unsigned long)ways,
+        (unsigned long)(line_size * sets * ways),
+        (unsigned long)((ccsidr & SCB_CCSIDR_WT_Msk) != 0),
+        (unsigned long)((ccsidr & SCB_CCSIDR_WB_Msk) != 0),
+        (unsigned long)((ccsidr & SCB_CCSIDR_RA_Msk) != 0),
+        (unsigned long)((ccsidr & SCB_CCSIDR_WA_Msk) != 0));
+
+    rnr = MPU->RNR;
+    regions = (MPU->TYPE & MPU_TYPE_DREGION_Msk) >> MPU_TYPE_DREGION_Pos;
+    printf("[sf32lb52-cache] MPU TYPE=0x%08lx CTRL=0x%08lx regions=%lu "
+           "MAIR0=0x%08lx MAIR1=0x%08lx\n",
+        (unsigned long)MPU->TYPE,
+        (unsigned long)MPU->CTRL,
+        (unsigned long)regions,
+        (unsigned long)MPU->MAIR0,
+        (unsigned long)MPU->MAIR1);
+
+    for (uint32_t i = 0; i < regions; i++)
+    {
+        uint32_t rbar;
+        uint32_t rlar;
+
+        MPU->RNR = i;
+        __DSB();
+        rbar = MPU->RBAR;
+        rlar = MPU->RLAR;
+        if ((rlar & MPU_RLAR_EN_Msk) != 0)
+        {
+            printf("[sf32lb52-cache] MPU R%lu RBAR=0x%08lx RLAR=0x%08lx\n",
+                (unsigned long)i,
+                (unsigned long)rbar,
+                (unsigned long)rlar);
+        }
+    }
+
+    MPU->RNR = rnr;
+    __DSB();
+#undef SF32LB52_SCB_CACR
+#undef SF32LB52_SCB_CACR_FORCEWT
+#endif
+}
+
+void sf32lb52_clock_dump(void)
+{
+#ifdef SOC_BF0_HCPU
+    uint32_t flash1_src = HAL_RCC_HCPU_GetClockSrc(RCC_CLK_MOD_FLASH1);
+    uint32_t flash2_src = HAL_RCC_HCPU_GetClockSrc(RCC_CLK_MOD_FLASH2);
+    uint32_t flash1_div = hwp_qspi1->PSCLR & MPI_PSCLR_DIV_Msk;
+    uint32_t flash2_div = hwp_qspi2->PSCLR & MPI_PSCLR_DIV_Msk;
+    uint32_t flash1_parent;
+    uint32_t flash2_parent;
+
+    flash1_parent = flash1_src == RCC_CLK_FLASH_DLL2 ?
+                    HAL_RCC_HCPU_GetDLL2Freq() : 48000000u;
+    flash2_parent = flash2_src == RCC_CLK_FLASH_DLL2 ?
+                    HAL_RCC_HCPU_GetDLL2Freq() : 48000000u;
+    printf("[sf32lb52-clock] hcpu_hclk=%lu Hz\n",
+        (unsigned long)HAL_RCC_GetHCLKFreq(CORE_ID_HCPU));
+    printf("[sf32lb52-clock] lcpu_hclk=%lu Hz\n",
+        (unsigned long)HAL_RCC_GetHCLKFreq(CORE_ID_LCPU));
+    printf("[sf32lb52-clock] dll1=%lu Hz dll2=%lu Hz\n",
+        (unsigned long)HAL_RCC_HCPU_GetDLL1Freq(),
+        (unsigned long)HAL_RCC_HCPU_GetDLL2Freq());
+    printf("[sf32lb52-clock] sys_src=%d hp_peri_src=%d flash1_src=%d flash2_src=%d\n",
+        HAL_RCC_HCPU_GetClockSrc(RCC_CLK_MOD_SYS),
+        HAL_RCC_HCPU_GetClockSrc(RCC_CLK_MOD_HP_PERI),
+        (int)flash1_src,
+        (int)flash2_src);
+    printf("[sf32lb52-clock] flash1_div=%lu freq~%lu Hz flash2_div=%lu freq~%lu Hz\n",
+        (unsigned long)flash1_div,
+        (unsigned long)(flash1_div ? flash1_parent / flash1_div : 0),
+        (unsigned long)flash2_div,
+        (unsigned long)(flash2_div ? flash2_parent / flash2_div : 0));
+    printf("[sf32lb52-clock] RCC CSR=0x%08lx CFGR=0x%08lx DLL1CR=0x%08lx DLL2CR=0x%08lx\n",
+        (unsigned long)hwp_hpsys_rcc->CSR,
+        (unsigned long)hwp_hpsys_rcc->CFGR,
+        (unsigned long)hwp_hpsys_rcc->DLL1CR,
+        (unsigned long)hwp_hpsys_rcc->DLL2CR);
+    printf("[sf32lb52-flash2] CR=0x%08lx DCR=0x%08lx PSCLR=0x%08lx "
+           "HCMDR=0x%08lx HRCCR=0x%08lx FIFOCR=0x%08lx MISCR=0x%08lx\n",
+        (unsigned long)hwp_qspi2->CR,
+        (unsigned long)hwp_qspi2->DCR,
+        (unsigned long)hwp_qspi2->PSCLR,
+        (unsigned long)hwp_qspi2->HCMDR,
+        (unsigned long)hwp_qspi2->HRCCR,
+        (unsigned long)hwp_qspi2->FIFOCR,
+        (unsigned long)hwp_qspi2->MISCR);
+    printf("[sf32lb52-flash2] prefetch=%lu pre_start=0x%08lx pre_end=0x%08lx\n",
+        (unsigned long)((hwp_qspi2->CR & MPI_CR_PREFE_Msk) != 0),
+        (unsigned long)hwp_qspi2->PRSAR,
+        (unsigned long)hwp_qspi2->PREAR);
+    sf32lb52_cache_dump();
+#endif
 }
 
