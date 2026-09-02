@@ -17,7 +17,11 @@
 #  undef g_lcpu_bin
 #  define g_lcpu_patch_list g_lcpu_patch_list_legacy
 #  define g_lcpu_patch_bin g_lcpu_patch_bin_legacy
-#  include "../../middleware/bluetooth/patch/sf32lb52/sf32lb52_lcpu_patch.h"
+   /* EXPERIMENT: newer legacy blob synced in e1cc823 (fixes "52X ble
+    * connection update dump" + "52 bt controller ld stop assert") for
+    * the revid=3 connect-time Hardware Error; see the header banner.
+    * Revert by swapping the include back to sf32lb52_lcpu_patch.h. */
+#  include "../../middleware/bluetooth/patch/sf32lb52/sf32lb52_lcpu_patch_exp.h"
 #  undef g_lcpu_patch_list
 #  undef g_lcpu_patch_bin
 #endif
@@ -185,6 +189,11 @@ void sf32lb52_lcpu_boot_dump_evidence(void)
   volatile uint32_t *assert_p = (volatile uint32_t *)0x2040FDA0;
   volatile uint32_t *cfg_p = (volatile uint32_t *)0x2040FDC0;
   uint32_t revid = __HAL_SYSCFG_GET_REVID();
+
+  /* The LCPU wrote this window over IPC; the HCPU cache may hold stale
+   * lines from a previous BT enable - invalidate before reading. */
+
+  up_invalidate_dcache((uintptr_t)0x2040FDA0, (uintptr_t)0x2040FDE0);
 
   syslog(LOG_ERR,
          "lcpu evidence: revid=%u (%s patch path) assert_over=%d "
