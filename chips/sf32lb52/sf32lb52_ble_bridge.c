@@ -318,16 +318,79 @@ static ssize_t bridge_write_command(struct bt_conn *conn,
   return len;
 }
 
+/* Some central stacks write the CCC as 0x0002 (indication) even though
+ * the characteristic only used to declare notify; bt_gatt_notify then
+ * rejects every send with "not subscribed". Both characteristics now
+ * declare indicate as well, and the notify wrapper below dispatches on
+ * the mode the peer actually subscribed with. The params structs are
+ * static because the stack keeps them until the peer confirms; only
+ * one link and one app thread exist, so one instance per
+ * characteristic is enough. While an indication is still awaiting its
+ * confirmation, further samples on that characteristic are dropped.
+ */
+
+static uint16_t g_status_ccc;
+static uint16_t g_data_ccc;
+
+static struct bt_gatt_indicate_params g_status_indp;
+static struct bt_gatt_indicate_params g_data_indp;
+static bool g_status_ind_pending;
+static bool g_data_ind_pending;
+
 static void bridge_status_ccc_changed(const struct bt_gatt_attr *attr,
                                       uint16_t value)
 {
+  g_status_ccc = value;
   BRIDGE_LOG("status ccc: 0x%04x\n", value);
 }
 
 static void bridge_data_ccc_changed(const struct bt_gatt_attr *attr,
                                     uint16_t value)
 {
+  g_data_ccc = value;
   BRIDGE_LOG("data ccc: 0x%04x\n", value);
+}
+
+static void bridge_status_ind_done(struct bt_conn *conn,
+                                   struct bt_gatt_indicate_params *params,
+                                   uint8_t err)
+{
+  (void)conn;
+  (void)params;
+
+  g_status_ind_pending = false;
+
+  if (err != 0)
+    {
+      BRIDGE_LOG("status indicate confirm err %u\n", err);
+    }
+}
+
+static void bridge_data_ind_done(struct bt_conn *conn,
+                                 struct bt_gatt_indicate_params *params,
+                                 uint8_t err)
+{
+  (void)conn;
+  (void)params;
+
+  g_data_ind_pending = false;
+
+  if (err != 0)
+    {
+      BRIDGE_LOG("data indicate confirm err %u\n", err);
+    }
+}
+
+static void bridge_ind_destroy(struct bt_gatt_indicate_params *params)
+{
+  if (params == &g_status_indp)
+    {
+      g_status_ind_pending = false;
+    }
+  else if (params == &g_data_indp)
+    {
+      g_data_ind_pending = false;
+    }
 }
 
 /****************************************************************************
@@ -345,10 +408,11 @@ static struct bt_gatt_attr g_bridge_attrs[] =
 
   BT_GATT_PRIMARY_SERVICE(&g_uuid_svc),
 
-  /* Status (f1): Read + Notify */
+  /* Status (f1): Read + Notify / Indicate */
 
   BT_GATT_CHARACTERISTIC(&g_uuid_status.uuid,
-                         BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
+                         BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY |
+                         BT_GATT_CHRC_INDICATE,
                          BT_GATT_PERM_READ,
                          bridge_read_status, NULL, NULL),
   BT_GATT_CCC(bridge_status_ccc_changed, BT_GATT_PERM_READ |
@@ -361,10 +425,10 @@ static struct bt_gatt_attr g_bridge_attrs[] =
                          BT_GATT_PERM_WRITE,
                          NULL, bridge_write_timesync, NULL),
 
-  /* DataUpload (f3): Notify */
+  /* DataUpload (f3): Notify / Indicate */
 
   BT_GATT_CHARACTERISTIC(&g_uuid_data.uuid,
-                         BT_GATT_CHRC_NOTIFY, 0,
+                         BT_GATT_CHRC_NOTIFY | BT_GATT_CHRC_INDICATE, 0,
                          NULL, NULL, NULL),
   BT_GATT_CCC(bridge_data_ccc_changed, BT_GATT_PERM_READ |
                                        BT_GATT_PERM_WRITE),
@@ -445,6 +509,15 @@ static void bridge_connected(struct bt_conn *conn, uint8_t err)
 static void bridge_disconnected(struct bt_conn *conn, uint8_t reason)
 {
   BRIDGE_LOG("disconnected, reason 0x%02x\n", reason);
+
+  /* Subscription state must be re-read after the next connect: CCC
+   * persistence is the stack's business, the cached mode is ours.
+   */
+
+  g_status_ccc = 0;
+  g_data_ccc = 0;
+  g_status_ind_pending = false;
+  g_data_ind_pending = false;
 
   sched_lock();
   if (g_bridge.conn != NULL)
@@ -721,7 +794,48 @@ int ai_watch_ble_bsp_notify(uint8_t chr, FAR const void *data,
           &g_bridge_svc.attrs[ATTR_IDX_STATUS_VAL] :
           &g_bridge_svc.attrs[ATTR_IDX_DATA_VAL];
 
-  ret = bt_gatt_notify(conn, attr, data, len);
+  /* The peer's subscription mode decides the ATT PDU: 0x0002 =
+   * indication (some central stacks subscribe this way), anything
+   * else = plain notification.
+   */
+
+  if ((chr == AI_WATCH_BLE_CHR_STATUS ?
+       g_status_ccc : g_data_ccc) == 0x0002)
+    {
+      struct bt_gatt_indicate_params *indp =
+        (chr == AI_WATCH_BLE_CHR_STATUS) ?
+        &g_status_indp : &g_data_indp;
+      bool *pending = (chr == AI_WATCH_BLE_CHR_STATUS) ?
+                      &g_status_ind_pending : &g_data_ind_pending;
+
+      if (*pending)
+        {
+          /* Previous indication not confirmed yet: drop this sample */
+
+          bt_conn_unref(conn);
+          return -EAGAIN;
+        }
+
+      memset(indp, 0, sizeof(*indp));
+      indp->attr = attr;
+      indp->data = data;
+      indp->len = len;
+      indp->func = (chr == AI_WATCH_BLE_CHR_STATUS) ?
+                   bridge_status_ind_done : bridge_data_ind_done;
+      indp->destroy = bridge_ind_destroy;
+
+      *pending = true;
+      ret = bt_gatt_indicate(conn, indp);
+      if (ret < 0)
+        {
+          *pending = false;
+        }
+    }
+  else
+    {
+      ret = bt_gatt_notify(conn, attr, data, len);
+    }
+
   bt_conn_unref(conn);
 
   if (ret == -EPERM || ret == -EACCES)
