@@ -39,6 +39,9 @@
 
 #include "bf0_hal.h"
 
+/* arm_lowprintf is implemented in sifli_start.c */
+extern int arm_lowprintf(const char *fmt, ...);
+
 /* Get a 32-bit version of the default priority */    
 #define DEFPRIORITY32 \
       (NVIC_SYSH_PRIORITY_DEFAULT << 24 | \

@@ -40,9 +40,16 @@
 #include "bf0_hal.h"
 #include "drv_io.h"
 #include "sifli_gpio.h"
+#include "sf32lb52_audio.h"
+
+/* sifli_i2cbus_initialize is defined in chips/sf32lb52/sifli_i2c.c
+ * (no public header exists yet in vendor_sifli)
+ */
+extern struct i2c_master_s *sifli_i2cbus_initialize(int port);
 
 #include <nuttx/arch.h>
 #include <nuttx/board.h>
+#include <nuttx/i2c/i2c_master.h>
 #include <nuttx/lcd/lcd.h>
 #include <nuttx/lcd/lcd_dev.h>
 #include <nuttx/timers/pwm.h>
@@ -395,6 +402,15 @@ int sf32lb52_lchspi_ulp_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_AUDIO
+  ret = sf32lb52_audio_initialize();
+  if (ret < 0)
+    {
+      serr("ERROR: sf32lb52_audio_initialize failed: %d\n", ret);
+      return ret;
+    }
+#endif
+
 #ifdef CONFIG_DEV_GPIO
   ret = sifli_gpio_initialize();
   if (ret < 0)
@@ -463,11 +479,10 @@ int sf32lb52_lchspi_ulp_bringup(void)
 #endif
 
 #ifdef CONFIG_I2C
-  /* Initialize I2C bus 0 on the touch panel pins. */
+  /* Initialize I2C bus 0 on the touch panel pins.
+   * Pinmux for I2C1 (SCL=PA30, SDA=PA33) is done in bsp_pinmux.c.
+   */
   struct i2c_master_s *i2c0 = NULL;
-
-  HAL_PIN_Set(PAD_PA37, I2C1_SCL, PIN_PULLUP, 1);
-  HAL_PIN_Set(PAD_PA33, I2C1_SDA, PIN_PULLUP, 1);
 
   i2c0 = sifli_i2cbus_initialize(0);
   if (i2c0 == NULL)

@@ -1006,7 +1006,6 @@ void up_putc(int ch)
 
   arm_lowputc(ch);
 #endif
-  return ch;
 }
 
 #endif /* USE_SERIALDRIVER */
