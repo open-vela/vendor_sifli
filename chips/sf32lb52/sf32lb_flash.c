@@ -474,7 +474,7 @@ static void sf32lb_flash_restore_ahb_read(FAR FLASH_HandleTypeDef *hflash)
   qmode = hflash->Mode != 0;
   if (hflash->size > NOR_FLASH_MAX_3B_SIZE)
     {
-      HAL_FLASH_CONFIG_FULL_AHB_READ(hflash, qmode);
+      HAL_FLASH_CONFIG_AHB_READ(hflash, qmode);
     }
   else
     {
