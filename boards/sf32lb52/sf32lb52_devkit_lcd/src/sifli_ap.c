@@ -466,7 +466,7 @@ int sf32lb52_lchspi_ulp_bringup(void)
   /* Initialize I2C bus 0 on the touch panel pins. */
   struct i2c_master_s *i2c0 = NULL;
 
-  HAL_PIN_Set(PAD_PA37, I2C1_SCL, PIN_PULLUP, 1);
+  HAL_PIN_Set(PAD_PA30, I2C1_SCL, PIN_PULLUP, 1);
   HAL_PIN_Set(PAD_PA33, I2C1_SDA, PIN_PULLUP, 1);
 
   i2c0 = sifli_i2cbus_initialize(0);

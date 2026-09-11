@@ -69,6 +69,14 @@ struct ft6146_touch_lowerhalf_s
   uint32_t pin_irq;
   uint16_t last_x;
   uint16_t last_y;
+
+  /* Set by the IRQ handler when it cannot queue the worker because one is
+   * already running.  The worker re-arms itself so the final finger state is
+   * always read.  Without this a quick tap loses its TOUCH_UP event and LVGL
+   * keeps believing the finger is still down, which makes the on-screen
+   * buttons respond only intermittently.
+   */
+  volatile bool work_pending;
 };
 
 /****************************************************************************
@@ -118,6 +126,10 @@ static void ft6146_data_worker(void *param)
   uint8_t touch_num;
   int ret;
 
+  /* Anything that happened before this point is covered by the sample we are
+   * about to take, so the flag can be cleared first. */
+  ft6146->work_pending = false;
+
   ret = ft6146_i2c_read(ft6146->i2c, FT6146_REG_TD_STATUS, buf, sizeof(buf));
   if (ret < 0)
     {
@@ -143,6 +155,18 @@ static void ft6146_data_worker(void *param)
   sample.point[0].y = ft6146->last_y;
 
   touch_event(ft6146->lower.priv, &sample);
+
+  /* Another edge may have arrived while we were reading the panel; run once
+   * more so that a press/release pair is never collapsed into a single
+   * sample. */
+  if (ft6146->work_pending)
+    {
+      ft6146->work_pending = false;
+      if (work_queue(HPWORK, &ft6146->work, ft6146_data_worker, ft6146, 0) < 0)
+        {
+          ft6146->work_pending = true;
+        }
+    }
 }
 
 static void ft6146_irq_handler(void *arg)
@@ -151,8 +175,16 @@ static void ft6146_irq_handler(void *arg)
     (struct ft6146_touch_lowerhalf_s *)arg;
   int ret;
 
+  /* A worker may already be running, in which case work_queue() returns
+   * -EBUSY.  That must not drop the edge (and must not trip the assert that
+   * used to live here): remember it so the running worker re-reads the panel
+   * and picks up the release.
+   */
   ret = work_queue(HPWORK, &ft6146->work, ft6146_data_worker, ft6146, 0);
-  DEBUGASSERT(ret == OK);
+  if (ret < 0)
+    {
+      ft6146->work_pending = true;
+    }
 }
 
 static int ft6146_hw_init(struct ft6146_touch_lowerhalf_s *ft6146)
