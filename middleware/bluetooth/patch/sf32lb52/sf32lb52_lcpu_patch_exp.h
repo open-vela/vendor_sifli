@@ -1,16 +1,36 @@
-/*
- * SPDX-FileCopyrightText: 2019-2025 SiFli Technologies(Nanjing) Co., Ltd
+/****************************************************************************
+ * vendor/sifli/middleware/bluetooth/patch/sf32lb52/sf32lb52_lcpu_patch_exp.h
  *
- * SPDX-License-Identifier: Apache-2.0
- */
+ * Legacy LCPU patch, newer SDK blob (synced in e1cc823) - FIELD VALIDATED
+ * on 2026-09-02: fixes the revid=3 connect-time LCPU assert (Hardware
+ * Error code 0 on every BLE connection; see dev log 2026-09-02).
+ * Production still pending SiFli confirmation of this exact blob for
+ * revid=3 silicon.
+ *
+ * The legacy patch arrays below are copied verbatim from the newer SDK
+ * sync in chips/drivers/cmsis/sf32lb52x/lcpu_patch.c (commit e1cc823),
+ * which the legacy path in sf32lb52_lcpu_boot.c never used - it kept
+ * loading the older blob from sf32lb52_lcpu_patch.h:
+ *
+ *   old bin: 2024 words / 8096 B, head F001B580 F001FE67 4805F8DF
+ *   new bin: 2040 words / 8160 B, head F001B580 F001FE87 4805F8FF
+ *
+ * The public SiFli-SDK change log for this blob includes
+ * "fix 52X ble connection update dump issue" and
+ * "fix 52 bt controller ld stop assert" - both match the revid=3
+ * connect-time LCPU assert seen on 2026-09-02 (Hardware Error code 0
+ * during the first seconds of a connection, 4/4 reproductions).
+ *
+ * Fits the 8 KiB LCPU patch region (LCPU_PATCH_TOTAL_SIZE), same as the
+ * previous 8096 B blob did. Revert by pointing sf32lb52_lcpu_boot.c
+ * back at sf32lb52_lcpu_patch.h.
+ ****************************************************************************/
 
-#include <stdint.h>
-#include <string.h>
-#include "bf0_hal.h"
-#include "mem_map.h"
-#include "register.h"
-#include "bf0_hal_patch.h"
-#ifdef HAL_LCPU_PATCH_MODULE
+#ifndef __SF32LB52_LCPU_PATCH_EXP_H
+#define __SF32LB52_LCPU_PATCH_EXP_H
+
+/* Patch list: address/instruction pairs applied by HAL_PATCH_install */
+
 const unsigned int g_lcpu_patch_list[] =
 {
     0x50544348, 0x000000F0, 0x00026664, 0x2102F9BD,
@@ -30,6 +50,8 @@ const unsigned int g_lcpu_patch_list[] =
     0x0000A028, 0x29030A0C, 0x00009EF4, 0x1CB947D8,
     0x0001EDA0, 0xB9F7F3E7,
 };
+
+/* Patch code fragments (2040 words / 8160 B) */
 
 const unsigned int g_lcpu_patch_bin[] =
 {
@@ -544,16 +566,5 @@ const unsigned int g_lcpu_patch_bin[] =
     0x42363142, 0x00424200, 0x48484242, 0x00004848,
     0x004071C9, 0x00407FC6, 0x00000041, 0x40082790,
 };
-void lcpu_patch_install()
-{
-    memcpy((void *)(LCPU_PATCH_RECORD_ADDR), g_lcpu_patch_list, sizeof(g_lcpu_patch_list));
-    HAL_PATCH_install();
-#ifdef SOC_BF0_HCPU
-    memset((void *)(LCPU_PATCH_START_ADDR_S), 0, LCPU_PATCH_TOTAL_SIZE);
-    memcpy((void *)(LCPU_PATCH_START_ADDR_S), g_lcpu_patch_bin, sizeof(g_lcpu_patch_bin));
-#else
-    memset((void *)(LCPU_PATCH_START_ADDR), 0, LCPU_PATCH_TOTAL_SIZE);
-    memcpy((void *)(LCPU_PATCH_START_ADDR), g_lcpu_patch_bin, sizeof(g_lcpu_patch_bin));
-#endif
-};
-#endif
+
+#endif /* __SF32LB52_LCPU_PATCH_EXP_H */

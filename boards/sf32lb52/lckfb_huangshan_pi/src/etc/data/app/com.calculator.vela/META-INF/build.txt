@@ -1,7 +1,0 @@
-originType=undefined
-toolkit=2.0.5
-timeStamp=2025-12-02T13:20:56.813Z
-node=v20.18.1
-platform=linux
-arch=x64
-component=true

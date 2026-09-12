@@ -1572,6 +1572,18 @@ menu "On-chip Peripheral RTOS Drivers"
         ---help---
             Enable the SF32LB52 on-chip MUSB USB device controller driver.
 
+    config AI_WATCH_BLE_BRIDGE
+        bool "AI Watch custom GATT bridge (contest app)"
+        default n
+        depends on BT && UART_BTH4
+        ---help---
+            Compile the AI Watch BLE bridge translation unit. This narrow
+            BSP file is the only place outside the zblue tree that includes
+            zblue headers; it registers the AI Watch custom GATT service,
+            starts connectable advertising as CONFIG_BT_DEVICE_NAME and
+            exposes a plain-C wrapper API (ai_watch_ble_bsp.h, header lives
+            in the contest app) to the application layer.
+
 endmenu
 
 endif

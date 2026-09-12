@@ -44,7 +44,20 @@ extern void BSP_Board_PreInit(void);
 
 #define SRAM_START  0x20000000
 #define SRAM_SIZE   0x00080000    /* 512 KB */
-#define SRAM_END    (SRAM_START + SRAM_SIZE)
+
+/* The top of HCPU SRAM is reserved by the vendor memory map (mem_map.h)
+ * and must never be handed to the heap:
+ *   0x2007FB00-0x2007FBFF  HCPU_CUSTOM_CONFIG (256B, consumed by the
+ *                          closed LCPU/ROM side)
+ *   0x2007FC00-0x2007FFFF  HPSYS_MBOX_BUF (2 x 512B); channel 1 carries
+ *                          the BT HCI stream at fixed addresses that the
+ *                          LCPU reads from its own RAM space.
+ * Heap allocations reaching this window corrupt the BT stream and the
+ * controller dies with "Hardware error, code 0" on the next connection.
+ */
+
+#define HCPU_TOP_RESERVED   0x500
+#define SRAM_END    (SRAM_START + SRAM_SIZE - HCPU_TOP_RESERVED)
 
 /* PSRAM memory configuration for SF32LB52 (MPI1 SBUS) */
 

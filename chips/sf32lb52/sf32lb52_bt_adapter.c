@@ -730,6 +730,8 @@ int sf32lb52_bt_controller_enable(void)
 
   if (g_sf32lb52_bt_status != SF32LB52_BT_STATUS_INITED)
     {
+      syslog(LOG_ERR, "sf32lb52 bt enable: bad status %d\n",
+             g_sf32lb52_bt_status);
       return -EPERM;
     }
 
@@ -739,6 +741,8 @@ int sf32lb52_bt_controller_enable(void)
   ret = lcpu_power_on();
   if (ret != 0)
     {
+      syslog(LOG_ERR, "sf32lb52 bt enable: lcpu_power_on failed: %d\n",
+             ret);
       return -EIO;
     }
 
@@ -758,6 +762,8 @@ int sf32lb52_bt_controller_enable(void)
   ret = ipc_queue_open(g_sf32lb52_bt_env.ipc_port);
   if (ret < 0)
     {
+      syslog(LOG_ERR, "sf32lb52 bt enable: ipc_queue_open failed: %d\n",
+             ret);
       HAL_HPAON_CANCEL_LP_ACTIVE_REQUEST();
       g_sf32lb52_bt_env.wake_held = false;
       return ret;
@@ -903,6 +909,9 @@ int sf32lb52_host_send_packet(const uint8_t *data, uint16_t len)
   if (g_sf32lb52_bt_status != SF32LB52_BT_STATUS_ENABLED ||
       !g_sf32lb52_bt_env.queue_open)
     {
+      syslog(LOG_ERR, "sf32lb52 bt send: controller not ready "
+             "(status=%d queue_open=%d)\n",
+             g_sf32lb52_bt_status, g_sf32lb52_bt_env.queue_open);
       return -ENODEV;
     }
 
