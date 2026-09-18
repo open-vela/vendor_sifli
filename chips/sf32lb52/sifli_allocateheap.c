@@ -31,6 +31,7 @@
 #include "chip.h"
 #include "arm_internal.h"
 #include "bf0_hal.h"
+#include "mem_map.h"
 
 extern void BSP_PIN_Init(void);
 extern void BSP_Power_Up(bool is_deep_sleep);
@@ -160,10 +161,10 @@ void HAL_PreInit(void)
 
 void up_allocate_heap(FAR void **heap_start, size_t *heap_size)
 {
-  /* The heap starts at g_idle_topstack and extends to the end of SRAM */
+  /* Reserve both HCPU-to-LCPU Bluetooth mailbox channels at SRAM end. */
   
   *heap_start = (FAR void *)g_idle_topstack;
-  *heap_size  = SRAM_END - g_idle_topstack;
+  *heap_size  = HCPU2LCPU_MB_CH2_BUF_START_ADDR - g_idle_topstack;
 }
 
 /******************************************************************************

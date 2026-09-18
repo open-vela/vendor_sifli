@@ -18,9 +18,11 @@
  *
  ****************************************************************************/
 
+#include <nuttx/config.h>
+
 MEMORY
 {
-  flash (rx) : ORIGIN = 0x12010000, LENGTH = 16M
+  flash (rx) : ORIGIN = 0x12010000, LENGTH = 0x990000 /* ends before /dev/config0 */
   sram (rwx) : ORIGIN = 0x20000000, LENGTH = 512K
   psram (rwx) : ORIGIN = 0x60000000, LENGTH = 8M
 }
@@ -243,3 +245,9 @@ SECTIONS
     .debug_pubnames 0 : { *(.debug_pubnames) }
     .debug_aranges 0 : { *(.debug_aranges) }
 }
+
+/* Keep the IDLE stack and both Bluetooth mailbox channels out of the heap. */
+ASSERT((_ebss + CONFIG_IDLETHREAD_STACKSIZE) <= 0x2007FC00,
+       "SRAM overflow: BSS plus IDLE stack overlaps Bluetooth mailbox")
+ASSERT((0x2007FC00 - (_ebss + CONFIG_IDLETHREAD_STACKSIZE)) >= 0x8000,
+       "Insufficient primary SRAM heap: need at least 32 KiB")

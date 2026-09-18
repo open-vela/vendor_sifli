@@ -49,6 +49,13 @@
 
 #define HEAP_BASE      ((uintptr_t)_ebss + CONFIG_IDLETHREAD_STACKSIZE)
 
+#define SIFLI_LPSYS_RAM_BASE  0x203fc000
+#define SIFLI_LPSYS_RAM_LIMIT 0x204fffff
+#define SIFLI_MPU_ATTR_RAM_IDX 0
+#define SIFLI_MPU_ATTR_RAM \
+  ARM_MPU_ATTR(ARM_MPU_ATTR_NON_CACHEABLE, \
+               ARM_MPU_ATTR_NON_CACHEABLE)
+
 extern uint32_t _siramfunc;
 extern uint32_t _sramfunc;
 extern uint32_t _eramfunc;
@@ -141,6 +148,26 @@ const uintptr_t g_idle_topstack = HEAP_BASE;
  * Private Functions
  ****************************************************************************/
 
+static void sifli_lpsys_mpu_config(void)
+{
+  uint32_t region;
+
+  ARM_MPU_Disable();
+
+  for (region = 0; region < MPU_REGION_NUM; region++)
+    {
+      ARM_MPU_ClrRegion(region);
+    }
+
+  ARM_MPU_SetMemAttr(SIFLI_MPU_ATTR_RAM_IDX, SIFLI_MPU_ATTR_RAM);
+  ARM_MPU_SetRegion(
+    0,
+    ARM_MPU_RBAR(SIFLI_LPSYS_RAM_BASE, ARM_MPU_SH_NON, 0, 1, 0),
+    ARM_MPU_RLAR(SIFLI_LPSYS_RAM_LIMIT, SIFLI_MPU_ATTR_RAM_IDX));
+
+  ARM_MPU_Enable(MPU_CTRL_HFNMIENA_Msk | MPU_CTRL_PRIVDEFENA_Msk);
+}
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
@@ -195,6 +222,13 @@ void __start(void)
     }
 
   arm_lowputc('A'); /* data segment init done */
+
+  /* The SiFli IPC rings are shared with LCPU and have producer and consumer
+   * indices in the same cache line.  Establish their non-cacheable memory
+   * attribute before either cache is enabled.
+   */
+
+  sifli_lpsys_mpu_config();
 
 #ifdef CONFIG_ARMV8M_ICACHE
   up_enable_icache();

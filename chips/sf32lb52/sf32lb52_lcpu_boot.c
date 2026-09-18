@@ -6,9 +6,14 @@
 #include <bf0_hal.h>
 #include <bf0_hal_patch.h>
 #include <nuttx/cache.h>
+#include <syslog.h>
 #include <string.h>
 
 #include "mem_map.h"
+
+#ifndef OV_BLE_CONTROLLER_IDENTITY_DIAG
+#  define OV_BLE_CONTROLLER_IDENTITY_DIAG 0
+#endif
 
 #if (!defined(SF32LB52X_REV_B)) && !defined(LCPU_RUN_ROM_ONLY)
 #  define g_lcpu_bin g_lcpu_bin_legacy
@@ -176,6 +181,30 @@ __WEAK __NOINLINE void lcpu_nvds_config(void)
 
 uint8_t lcpu_power_on(void)
 {
+#if OV_BLE_CONTROLLER_IDENTITY_DIAG
+  uint8_t rev_id = __HAL_SYSCFG_GET_REVID();
+
+  if (rev_id < HAL_CHIP_REV_ID_A4)
+    {
+#if (!defined(SF32LB52X_REV_B)) && !defined(LCPU_RUN_ROM_ONLY)
+      syslog(LOG_INFO,
+             "ov_ble_controller_identity_diag revid=0x%02x branch=legacy_ram boot_addr=0x%08lx image_len=%lu patch_addr=0x%08lx patch_len=%lu rom_patch=0\n",
+             rev_id, (unsigned long)HCPU_LCPU_CODE_START_ADDR,
+             (unsigned long)sizeof(g_lcpu_bin_legacy),
+             (unsigned long)LCPU_PATCH_START_ADDR_S,
+             (unsigned long)sizeof(g_lcpu_patch_bin_legacy));
+#endif
+    }
+  else
+    {
+      syslog(LOG_INFO,
+             "ov_ble_controller_identity_diag revid=0x%02x branch=rom_rev_b boot_addr=0x%08lx patch_addr=0x%08lx patch_region_len=%lu rom_patch=1\n",
+             rev_id, (unsigned long)HCPU_LCPU_CODE_START_ADDR,
+             (unsigned long)LCPU_PATCH_CODE_START_ADDR_S,
+             (unsigned long)LCPU_PATCH_CODE_SIZE);
+    }
+#endif
+
   HAL_HPAON_WakeCore(CORE_ID_LCPU);
   HAL_RCC_Reset_and_Halt_LCPU(0);
 

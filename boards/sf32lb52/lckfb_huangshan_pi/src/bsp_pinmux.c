@@ -205,7 +205,13 @@ static void BSP_PIN_Common(void)
     HAL_PIN_Set(PAD_PA26, GPIO_A26, PIN_NOPULL, 1);
     HAL_PIN_Set(PAD_PA38, GPIO_A38, PIN_PULLDOWN, 1);
     HAL_PIN_Set(PAD_PA30, GPIO_A30, PIN_PULLDOWN, 1);   // Sensor Power
+    HAL_PIN_Set(PAD_PA31, GPIO_A31, PIN_NOPULL, 1);     // IMU INT1
     HAL_PIN_Set(PAD_PA44, GPIO_A44, PIN_NOPULL, 1);     // VBUS_DET
+
+#ifdef BSP_USING_I2C3
+    HAL_PIN_Set(PAD_PA40, I2C3_SCL, PIN_PULLUP, 1);
+    HAL_PIN_Set(PAD_PA39, I2C3_SDA, PIN_PULLUP, 1);
+#endif
 #endif
 
 }
@@ -281,4 +287,3 @@ void BSP_PIN_Init(void)
     BSP_PIN_LCD();
 
 }
-

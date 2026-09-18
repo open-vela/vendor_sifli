@@ -29,6 +29,7 @@
 #include <debug.h>
 
 #include <nuttx/wireless/bluetooth/bt_hci.h>
+#include <nuttx/irq.h>
 #include <nuttx/serial/uart_bth4.h>
 #include <nuttx/wireless/bluetooth/bt_driver.h>
 #include <nuttx/wireless/bluetooth/bt_uart.h>
@@ -37,6 +38,37 @@
 
 #define SF32LB52_BT_H4_RX_BUFSIZE 2048
 #define SF32LB52_BT_TRACE         0
+
+#ifndef SF32LB52_ACL_OBSERVER
+#  define SF32LB52_ACL_OBSERVER 1
+#endif
+
+/* Set to 0 to compile out all Extended Advertising HCI diagnostics. */
+
+#define OV_BLE_HCI_ADV_DIAG       1
+
+#ifndef OV_BLE_HCI_LINK_EVENT_DIAG
+#  define OV_BLE_HCI_LINK_EVENT_DIAG 0
+#endif
+
+#ifndef OV_BLE_HCI_LE_EVENT_MASK_PASSTHROUGH
+#  define OV_BLE_HCI_LE_EVENT_MASK_PASSTHROUGH 0
+#endif
+
+#ifndef OV_BLE_HCI_LE_EVENT_MASK_AB_DIAG
+#  define OV_BLE_HCI_LE_EVENT_MASK_AB_DIAG 0
+#endif
+
+#ifndef OV_BLE_HCI_ADV_LIFECYCLE_BTH4_DIAG
+#  define OV_BLE_HCI_ADV_LIFECYCLE_BTH4_DIAG 0
+#endif
+
+#ifndef OV_BLE_HCI_RX_RING_SNAPSHOT_DIAG
+#  define OV_BLE_HCI_RX_RING_SNAPSHOT_DIAG 0
+#endif
+
+#define OV_BLE_HCI_EXT_ADV_DATA   0x2037
+#define OV_BLE_HCI_EXT_SCAN_RSP   0x2038
 
 #ifndef BT_HCI_OP_READ_SUPPORTED_COMMANDS
 #  define BT_HCI_OP_READ_SUPPORTED_COMMANDS BT_OP(BT_OGF_INFO, 0x0002)
@@ -114,6 +146,14 @@
 #  define BT_HCI_OP_LE_SET_EVENT_MASK       BT_OP(BT_OGF_LE, 0x0001)
 #endif
 
+#ifndef BT_HCI_OP_LE_SET_EXT_ADV_PARAM
+#  define BT_HCI_OP_LE_SET_EXT_ADV_PARAM    BT_OP(BT_OGF_LE, 0x0036)
+#endif
+
+#ifndef BT_HCI_OP_LE_REMOVE_ADV_SET
+#  define BT_HCI_OP_LE_REMOVE_ADV_SET       BT_OP(BT_OGF_LE, 0x003c)
+#endif
+
 #ifndef BT_HCI_OP_LE_READ_SUPP_STATES
 #  define BT_HCI_OP_LE_READ_SUPP_STATES     BT_OP(BT_OGF_LE, 0x001c)
 #endif
@@ -151,13 +191,97 @@
 #define SF32LB52_HCI_RAND_RPLEN              9
 #define SF32LB52_HCI_MAX_CMD_COMPLETE_RPLEN  SF32LB52_HCI_READ_COMMANDS_RPLEN
 
+struct sf32lb52_bt_acl_tx_record
+{
+  uint32_t seq;
+    uint32_t t_ticks;
+  uint16_t len;
+  uint8_t truncated;
+  uint8_t copied;
+  int16_t result;
+  uint8_t data[64];
+};
+
 struct sf32lb52_bt_priv_s
 {
   struct bt_driver_s drv;
   uint8_t rxbuf[SF32LB52_BT_H4_RX_BUFSIZE];
   size_t rxlen;
   bool drop_rx_until_tx;
+  /* Connection-independent ACL transport counters.  These are deliberately
+   * not tied to an ATT PDU: the HCI driver has no safe cross-layer identity. */
+  volatile uint32_t tx_acl_calls;
+  volatile uint32_t tx_acl_errors;
+  volatile uint32_t tx_acl_success;
+  volatile int32_t tx_acl_last_error;
+#if SF32LB52_ACL_OBSERVER
+  uint32_t acl_tx_seq;
+  uint32_t acl_tx_dropped;
+  uint32_t acl_tx_early;
+  uint32_t acl_tx_tail_count;
+  uint32_t acl_tx_tail_next;
+  struct sf32lb52_bt_acl_tx_record acl_tx_log[32];
+#endif
+#if OV_BLE_HCI_RX_RING_SNAPSHOT_DIAG
+  uint32_t diag_complete_h4_count;
+  uint32_t diag_forwarded_h4_count;
+  uint32_t diag_sequence;
+  uint16_t diag_last_opcode;
+  uint8_t diag_last_h4_type;
+  uint8_t diag_last_event;
+#endif
 };
+
+#if SF32LB52_ACL_OBSERVER
+static struct sf32lb52_bt_acl_tx_record g_acl_tx_dump[32];
+
+static void sf32lb52_bt_acl_tx_log_dump(struct sf32lb52_bt_priv_s *priv)
+{
+  uint32_t i;
+  uint32_t tail_start;
+
+  irqstate_t flags = enter_critical_section();
+  memcpy(g_acl_tx_dump, priv->acl_tx_log, sizeof(g_acl_tx_dump));
+  uint32_t early = priv->acl_tx_early;
+  uint32_t tail_count = priv->acl_tx_tail_count;
+  uint32_t tail_next = priv->acl_tx_tail_next;
+  uint32_t dropped = priv->acl_tx_dropped;
+  leave_critical_section(flags);
+
+  syslog(LOG_INFO, "A5_ACL_TX_DUMP count=%lu dropped=%lu\n",
+         (unsigned long)(early + tail_count), (unsigned long)dropped);
+  for (i = 0; i < early + tail_count; i++)
+    {
+      uint32_t slot;
+      char hex[129];
+      uint32_t j;
+
+      if (i < early)
+        {
+          slot = i;
+        }
+      else
+        {
+          tail_start = tail_count == 28 ? tail_next : 0;
+          slot = 4 + ((tail_start + i - early) % 28);
+        }
+
+      for (j = 0; j < g_acl_tx_dump[slot].copied; j++)
+        {
+          static const char digits[] = "0123456789abcdef";
+          hex[j * 2] = digits[g_acl_tx_dump[slot].data[j] >> 4];
+          hex[j * 2 + 1] = digits[g_acl_tx_dump[slot].data[j] & 0xf];
+        }
+      hex[g_acl_tx_dump[slot].copied * 2] = '\0';
+      syslog(LOG_INFO, "A5_ACL_TX seq=%lu t_ticks=%lu len=%u copied=%u "
+             "trunc=%u result=%d p=%s\n",
+             (unsigned long)g_acl_tx_dump[slot].seq,
+             (unsigned long)g_acl_tx_dump[slot].t_ticks,
+             g_acl_tx_dump[slot].len, g_acl_tx_dump[slot].copied,
+             g_acl_tx_dump[slot].truncated, g_acl_tx_dump[slot].result, hex);
+    }
+}
+#endif /* SF32LB52_ACL_OBSERVER */
 
 static int sf32lb52_bt_open(struct bt_driver_s *drv);
 static int sf32lb52_bt_send(struct bt_driver_s *drv,
@@ -166,6 +290,38 @@ static int sf32lb52_bt_send(struct bt_driver_s *drv,
 static void sf32lb52_bt_close(struct bt_driver_s *drv);
 static int sf32lb52_bt_recv_cb(uint8_t *data, uint16_t len);
 static int sf32lb52_bt_ensure_controller_enabled(uint16_t opcode);
+static uint16_t sf32lb52_bt_get_le16(const uint8_t *data);
+
+#if OV_BLE_HCI_RX_RING_SNAPSHOT_DIAG
+static void sf32lb52_bt_snapshot_note_complete(
+    struct sf32lb52_bt_priv_s *priv, const uint8_t *data, size_t len)
+{
+  irqstate_t flags;
+  uint16_t opcode = 0;
+  uint8_t event = 0;
+
+  if (len >= 3 && data[0] == 0x04)
+    {
+      event = data[1];
+      if (event == 0x0e && len >= 7)
+        {
+          opcode = sf32lb52_bt_get_le16(&data[4]);
+        }
+      else if (event == 0x0f && len >= 7)
+        {
+          opcode = sf32lb52_bt_get_le16(&data[5]);
+        }
+    }
+
+  flags = enter_critical_section();
+  priv->diag_complete_h4_count++;
+  priv->diag_sequence++;
+  priv->diag_last_h4_type = data[0];
+  priv->diag_last_event = event;
+  priv->diag_last_opcode = opcode;
+  leave_critical_section(flags);
+}
+#endif
 
 #ifdef CONFIG_BT
 extern void z_sys_init(void);
@@ -190,6 +346,137 @@ static uint16_t sf32lb52_bt_get_le16(const uint8_t *data)
 {
   return (uint16_t)data[0] | ((uint16_t)data[1] << 8);
 }
+
+static bool sf32lb52_bt_adv_diag_opcode(uint16_t opcode)
+{
+  return opcode == OV_BLE_HCI_EXT_ADV_DATA ||
+         opcode == OV_BLE_HCI_EXT_SCAN_RSP;
+}
+
+#if OV_BLE_HCI_ADV_DIAG
+static void sf32lb52_bt_diag_complete_event(const uint8_t *data, size_t len)
+{
+  uint16_t opcode;
+  uint8_t status;
+  uint8_t ncmd;
+
+  if (len < H4_HEADER_SIZE + sizeof(struct bt_hci_evt_hdr_s) + 4 ||
+      data[0] != H4_EVT)
+    {
+      return;
+    }
+
+  if (data[1] == BT_HCI_EVT_CMD_COMPLETE && data[2] >= 4)
+    {
+      ncmd = data[3];
+      opcode = sf32lb52_bt_get_le16(&data[4]);
+      status = data[6];
+    }
+  else if (data[1] == BT_HCI_EVT_CMD_STATUS && data[2] >= 4)
+    {
+      status = data[3];
+      ncmd = data[4];
+      opcode = sf32lb52_bt_get_le16(&data[5]);
+    }
+  else
+    {
+      return;
+    }
+
+  if (sf32lb52_bt_adv_diag_opcode(opcode))
+    {
+      syslog(LOG_INFO,
+             "ov_ble_hci_adv_diag bth4_rx event=0x%02x len=%lu opcode=0x%04x status=0x%02x ncmd=%u\n",
+             data[1], (unsigned long)len, opcode, status, ncmd);
+    }
+}
+#endif
+
+#if OV_BLE_HCI_LE_EVENT_MASK_AB_DIAG
+static void sf32lb52_bt_le_mask_diag_complete_event(const uint8_t *data,
+                                                    size_t len)
+{
+  uint16_t opcode;
+  uint8_t status;
+  uint8_t ncmd;
+
+  if (len < H4_HEADER_SIZE + sizeof(struct bt_hci_evt_hdr_s) + 4 ||
+      data[0] != H4_EVT)
+    {
+      return;
+    }
+
+  if (data[1] == BT_HCI_EVT_CMD_COMPLETE && data[2] >= 4)
+    {
+      ncmd = data[3];
+      opcode = sf32lb52_bt_get_le16(&data[4]);
+      status = data[6];
+    }
+  else if (data[1] == BT_HCI_EVT_CMD_STATUS && data[2] >= 4)
+    {
+      status = data[3];
+      ncmd = data[4];
+      opcode = sf32lb52_bt_get_le16(&data[5]);
+    }
+  else
+    {
+      return;
+    }
+
+  if (opcode == BT_HCI_OP_LE_SET_EVENT_MASK)
+    {
+      syslog(LOG_INFO,
+             "ov_ble_hci_le_mask_ab_diag event=0x%02x opcode=0x%04x status=0x%02x ncmd=%u\n",
+             data[1], opcode, status, ncmd);
+    }
+}
+#endif
+
+#if OV_BLE_HCI_ADV_LIFECYCLE_BTH4_DIAG
+static bool sf32lb52_bt_adv_lifecycle_diag_opcode(uint16_t opcode)
+{
+  return opcode == BT_HCI_OP_LE_SET_EXT_ADV_PARAM ||
+         opcode == BT_HCI_OP_LE_REMOVE_ADV_SET;
+}
+
+static void sf32lb52_bt_adv_lifecycle_diag_complete_event(
+    const uint8_t *data, size_t len)
+{
+  uint16_t opcode;
+  uint8_t status;
+  uint8_t ncmd;
+
+  if (len < H4_HEADER_SIZE + sizeof(struct bt_hci_evt_hdr_s) + 4 ||
+      data[0] != H4_EVT)
+    {
+      return;
+    }
+
+  if (data[1] == BT_HCI_EVT_CMD_COMPLETE && data[2] >= 4)
+    {
+      ncmd = data[3];
+      opcode = sf32lb52_bt_get_le16(&data[4]);
+      status = data[6];
+    }
+  else if (data[1] == BT_HCI_EVT_CMD_STATUS && data[2] >= 4)
+    {
+      status = data[3];
+      ncmd = data[4];
+      opcode = sf32lb52_bt_get_le16(&data[5]);
+    }
+  else
+    {
+      return;
+    }
+
+  if (sf32lb52_bt_adv_lifecycle_diag_opcode(opcode))
+    {
+      syslog(LOG_INFO,
+             "ov_ble_hci_adv_lifecycle_diag bth4_rx event=0x%02x opcode=0x%04x status=0x%02x ncmd=%u frame_len=%lu\n",
+             data[1], opcode, status, ncmd, (unsigned long)len);
+    }
+}
+#endif
 
 static void sf32lb52_bt_put_le16(uint8_t *data, uint16_t value)
 {
@@ -297,6 +584,36 @@ static int sf32lb52_bt_forward_packet(struct sf32lb52_bt_priv_s *priv,
       default:
         return -EINVAL;
     }
+
+#if OV_BLE_HCI_LINK_EVENT_DIAG || OV_BLE_HCI_LE_EVENT_MASK_AB_DIAG
+#if OV_BLE_HCI_LINK_EVENT_DIAG
+  if (len == 7 && data[0] == H4_EVT && data[1] == 0x05 &&
+      data[2] == 0x04)
+    {
+      syslog(LOG_INFO,
+             "ov_ble_hci_link_event_diag event=disconnect_complete status=0x%02x conn_handle=0x%04x reason=0x%02x frame_len=%lu\n",
+             data[3], sf32lb52_bt_get_le16(&data[4]), data[6],
+             (unsigned long)len);
+    }
+  else
+#endif
+  if (len == 9 && data[0] == H4_EVT && data[1] == 0x3e &&
+      data[2] == 0x06 && data[3] == 0x12)
+    {
+#if OV_BLE_HCI_LINK_EVENT_DIAG
+      syslog(LOG_INFO,
+             "ov_ble_hci_link_event_diag event=adv_set_terminated status=0x%02x adv_handle=%u conn_handle=0x%04x count=%u frame_len=%lu\n",
+             data[4], data[5], sf32lb52_bt_get_le16(&data[6]), data[8],
+             (unsigned long)len);
+#endif
+#if OV_BLE_HCI_LE_EVENT_MASK_AB_DIAG
+      syslog(LOG_INFO,
+             "ov_ble_hci_le_mask_ab_diag event=adv_set_terminated status=0x%02x adv_handle=%u conn_handle=0x%04x count=%u frame_len=%lu\n",
+             data[4], data[5], sf32lb52_bt_get_le16(&data[6]), data[8],
+             (unsigned long)len);
+#endif
+    }
+#endif
 
   ret = bt_netdev_receive(&priv->drv,
                           type,
@@ -429,6 +746,9 @@ static bool sf32lb52_bt_emulate_cmd(struct sf32lb52_bt_priv_s *priv,
       case BT_HCI_OP_LE_WRITE_LE_HOST_SUPP:
       case BT_HCI_OP_LE_SET_HOST_FEATURE:
       case BT_HCI_OP_LE_SET_EVENT_MASK:
+#if OV_BLE_HCI_LE_EVENT_MASK_PASSTHROUGH
+        return false;
+#endif
       case BT_HCI_OP_LE_WRITE_DEFAULT_DATA_LEN:
       case BT_HCI_OP_LE_SET_RPA_TIMEOUT:
       case BT_HCI_OP_SET_EVENT_MASK:
@@ -466,6 +786,21 @@ static struct sf32lb52_bt_priv_s g_sf32lb52_bt_priv =
       .close        = sf32lb52_bt_close,
     },
 };
+
+void sf32lb52_bt_diag_dump_acl_tx(void)
+{
+  struct sf32lb52_bt_priv_s *priv = &g_sf32lb52_bt_priv;
+  irqstate_t flags = enter_critical_section();
+  uint32_t calls = priv->tx_acl_calls;
+  uint32_t errors = priv->tx_acl_errors;
+  uint32_t success = priv->tx_acl_success;
+  int32_t last = priv->tx_acl_last_error;
+  leave_critical_section(flags);
+  syslog(LOG_INFO,
+         "sf32lb52_acl_tx_summary scope=transport calls=%lu success=%lu errors=%lu last_error=%ld\n",
+         (unsigned long)calls, (unsigned long)success,
+         (unsigned long)errors, (long)last);
+}
 
 static int sf32lb52_bt_recv_cb(uint8_t *data, uint16_t len)
 {
@@ -528,8 +863,42 @@ static int sf32lb52_bt_recv_cb(uint8_t *data, uint16_t len)
           break;
         }
 
+#if SF32LB52_ACL_OBSERVER
+      if (packet_len == 7 && priv->rxbuf[0] == H4_EVT &&
+          priv->rxbuf[1] == 0x05 && priv->rxbuf[2] == 0x04)
+        {
+          sf32lb52_bt_acl_tx_log_dump(priv);
+        }
+#endif
+
+#if OV_BLE_HCI_RX_RING_SNAPSHOT_DIAG
+      sf32lb52_bt_snapshot_note_complete(priv, priv->rxbuf,
+                                         (size_t)packet_len);
+#endif
+
+#if OV_BLE_HCI_ADV_DIAG
+      sf32lb52_bt_diag_complete_event(priv->rxbuf, (size_t)packet_len);
+#endif
+#if OV_BLE_HCI_LE_EVENT_MASK_AB_DIAG
+      sf32lb52_bt_le_mask_diag_complete_event(priv->rxbuf,
+                                              (size_t)packet_len);
+#endif
+#if OV_BLE_HCI_ADV_LIFECYCLE_BTH4_DIAG
+      sf32lb52_bt_adv_lifecycle_diag_complete_event(
+          priv->rxbuf, (size_t)packet_len);
+#endif
+
       ret = sf32lb52_bt_forward_packet(priv, priv->rxbuf,
                    (size_t)packet_len);
+
+#if OV_BLE_HCI_RX_RING_SNAPSHOT_DIAG
+      {
+        irqstate_t flags = enter_critical_section();
+        priv->diag_forwarded_h4_count++;
+        priv->diag_sequence++;
+        leave_critical_section(flags);
+      }
+#endif
 
       priv->rxlen -= (size_t)packet_len;
       if (priv->rxlen > 0)
@@ -541,6 +910,33 @@ static int sf32lb52_bt_recv_cb(uint8_t *data, uint16_t len)
     }
 
   return ret;
+}
+
+int bt_hci_rx_ring_snapshot(struct bt_hci_rx_ring_snapshot_s *snapshot)
+{
+#if OV_BLE_HCI_RX_RING_SNAPSHOT_DIAG
+  struct sf32lb52_bt_priv_s *priv = &g_sf32lb52_bt_priv;
+  irqstate_t flags;
+  int ret;
+
+  ret = sf32lb52_bt_rx_ring_snapshot(snapshot);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  flags = enter_critical_section();
+  snapshot->complete_h4_count = priv->diag_complete_h4_count;
+  snapshot->forwarded_h4_count = priv->diag_forwarded_h4_count;
+  snapshot->sequence += priv->diag_sequence;
+  snapshot->last_opcode = priv->diag_last_opcode;
+  snapshot->last_h4_type = priv->diag_last_h4_type;
+  snapshot->last_event = priv->diag_last_event;
+  leave_critical_section(flags);
+  return OK;
+#else
+  return -ENOSYS;
+#endif
 }
 
 static int sf32lb52_bt_send(struct bt_driver_s *drv,
@@ -570,6 +966,23 @@ static int sf32lb52_bt_send(struct bt_driver_s *drv,
   if (type == BT_CMD && len >= sizeof(struct bt_hci_cmd_hdr_s))
     {
       opcode = sf32lb52_bt_get_le16(data);
+#if OV_BLE_HCI_LE_EVENT_MASK_AB_DIAG
+      const uint8_t *cmd = data;
+
+      if (opcode == BT_HCI_OP_LE_SET_EVENT_MASK &&
+          len == sizeof(struct bt_hci_cmd_hdr_s) + 8 && cmd[2] == 8)
+        {
+          syslog(LOG_INFO,
+                 "ov_ble_hci_le_mask_ab_diag tx opcode=0x%04x mask=%02x%02x%02x%02x%02x%02x%02x%02x bit17=%u mode=%s\n",
+                 opcode, cmd[10], cmd[9], cmd[8], cmd[7], cmd[6],
+                 cmd[5], cmd[4], cmd[3], (cmd[5] >> 1) & 1,
+#if OV_BLE_HCI_LE_EVENT_MASK_PASSTHROUGH
+                 "passthrough");
+#else
+                 "emulated");
+#endif
+        }
+#endif
       if (sf32lb52_bt_emulate_cmd(priv, opcode, &ret))
         {
           return ret < 0 ? ret : len;
@@ -592,6 +1005,49 @@ static int sf32lb52_bt_send(struct bt_driver_s *drv,
 
   priv->drop_rx_until_tx = false;
 
+  if (type == BT_ACL_OUT)
+    {
+      irqstate_t flags = enter_critical_section();
+      priv->tx_acl_calls++;
+      leave_critical_section(flags);
+    }
+
+#if SF32LB52_ACL_OBSERVER
+  if (type == BT_ACL_OUT)
+    {
+      uint32_t seq = priv->acl_tx_seq++;
+      uint32_t slot;
+      uint32_t early = priv->acl_tx_early;
+
+      if (early < 4)
+        {
+          slot = early;
+          priv->acl_tx_early = early + 1;
+        }
+      else
+        {
+          slot = 4 + priv->acl_tx_tail_next;
+          priv->acl_tx_tail_next = (priv->acl_tx_tail_next + 1) % 28;
+          if (priv->acl_tx_tail_count < 28)
+            priv->acl_tx_tail_count++;
+          else
+            priv->acl_tx_dropped++;
+        }
+
+      priv->acl_tx_log[slot].seq = seq;
+      priv->acl_tx_log[slot].t_ticks = clock_systime_ticks();
+      priv->acl_tx_log[slot].len = len + drv->head_reserve;
+      priv->acl_tx_log[slot].copied =
+        (len + drv->head_reserve < sizeof(priv->acl_tx_log[slot].data)) ?
+        (len + drv->head_reserve) : sizeof(priv->acl_tx_log[slot].data);
+      priv->acl_tx_log[slot].truncated =
+        (len + drv->head_reserve) > sizeof(priv->acl_tx_log[slot].data);
+      priv->acl_tx_log[slot].result = 0;
+      memcpy(priv->acl_tx_log[slot].data, hdr,
+             priv->acl_tx_log[slot].copied);
+    }
+#endif
+
   if (SF32LB52_BT_TRACE && type == BT_ACL_OUT)
     {
       syslog(LOG_INFO,
@@ -606,6 +1062,50 @@ static int sf32lb52_bt_send(struct bt_driver_s *drv,
     }
 
   ret = sf32lb52_host_send_packet(hdr, len + drv->head_reserve);
+  if (type == BT_ACL_OUT)
+    {
+      irqstate_t flags = enter_critical_section();
+      if (ret < 0)
+        {
+          priv->tx_acl_errors++;
+          priv->tx_acl_last_error = ret;
+        }
+      else
+        {
+          priv->tx_acl_success++;
+        }
+      leave_critical_section(flags);
+    }
+#if SF32LB52_ACL_OBSERVER
+  if (type == BT_ACL_OUT)
+    {
+      uint32_t slot = priv->acl_tx_early < 4 ? priv->acl_tx_early - 1 :
+        4 + ((priv->acl_tx_tail_next + 27) % 28);
+      priv->acl_tx_log[slot].result = ret;
+    }
+#endif
+#if OV_BLE_HCI_ADV_LIFECYCLE_BTH4_DIAG
+  if (type == BT_CMD && sf32lb52_bt_adv_lifecycle_diag_opcode(opcode))
+    {
+      const uint8_t *cmd = data;
+
+      if (len >= sizeof(struct bt_hci_cmd_hdr_s) &&
+          len == sizeof(struct bt_hci_cmd_hdr_s) + cmd[2])
+        {
+          syslog(LOG_INFO,
+                 "ov_ble_hci_adv_lifecycle_diag bth4_tx opcode=0x%04x h4_len=%lu result=%d\n",
+                 opcode, (unsigned long)(len + drv->head_reserve), ret);
+        }
+    }
+#endif
+#if OV_BLE_HCI_ADV_DIAG
+  if (type == BT_CMD && sf32lb52_bt_adv_diag_opcode(opcode))
+    {
+      syslog(LOG_INFO,
+             "ov_ble_hci_adv_diag bth4_tx opcode=0x%04x h4_len=%lu result=%d\n",
+             opcode, (unsigned long)(len + drv->head_reserve), ret);
+    }
+#endif
   if (ret < 0)
     {
       return ret;

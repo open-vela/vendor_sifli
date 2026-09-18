@@ -43,6 +43,7 @@
 
 #include <nuttx/arch.h>
 #include <nuttx/board.h>
+#include <arch/board/board.h>
 #include <nuttx/lcd/lcd.h>
 #include <nuttx/lcd/lcd_dev.h>
 #include <nuttx/timers/pwm.h>
@@ -71,6 +72,26 @@ extern int sf32lb_adc_init(const char *devpath);
 #ifdef CONFIG_CDCACM
 #  include <nuttx/usb/cdcacm.h>
 #endif
+
+#define HUANGSHAN_IMU_INT1_PIN GET_PIN_2(hwp_gpio1, 31)
+
+int board_imu_int1_enable(board_imu_int1_callback_t callback, void *arg)
+{
+  if (callback == NULL)
+    {
+      return -EINVAL;
+    }
+
+  sifli_gpio_config(HUANGSHAN_IMU_INT1_PIN, GPIO_INPUT);
+  return sifli_gpio_set_event(HUANGSHAN_IMU_INT1_PIN, true, false,
+                              callback, arg);
+}
+
+int board_imu_int1_disable(void)
+{
+  return sifli_gpio_set_event(HUANGSHAN_IMU_INT1_PIN, false, false,
+                              NULL, NULL);
+}
 
 #ifdef CONFIG_MTD
 extern int sf32lb_nor_automount(int minor, int block_offset, int block_count);
@@ -528,6 +549,28 @@ int sf32lb52_lchspi_ulp_bringup(void)
 #endif
     }
 #endif /* CONFIG_BSP_USING_I2C2 */
+
+#ifdef CONFIG_BSP_USING_I2C3
+  /* I2C1 and I2C2 occupy compressed ports 0 and 1, so physical I2C3 is
+   * port 2 and is exposed as /dev/i2c2 for the onboard sensors.
+   */
+  struct i2c_master_s *i2c2 = NULL;
+
+  i2c2 = sifli_i2cbus_initialize(2);
+  if (i2c2 == NULL)
+    {
+      syslog(LOG_ERR, "ERROR: sifli_i2cbus_initialize(2) failed\n");
+    }
+  else
+    {
+      ret = i2c_register(i2c2, 2);
+      if (ret < 0)
+        {
+          syslog(LOG_ERR, "ERROR: i2c_register(/dev/i2c2) failed: %d\n",
+                 ret);
+        }
+    }
+#endif /* CONFIG_BSP_USING_I2C3 */
 #endif /* CONFIG_I2C */
 
 #if defined(CONFIG_SPI) && defined(CONFIG_BSP_USING_SPI1) && \

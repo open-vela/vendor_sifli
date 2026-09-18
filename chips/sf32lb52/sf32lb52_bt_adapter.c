@@ -28,6 +28,7 @@
 
 #include <nuttx/cache.h>
 #include <nuttx/clock.h>
+#include <nuttx/irq.h>
 #include <nuttx/spinlock.h>
 #include <nuttx/wqueue.h>
 
@@ -51,6 +52,236 @@
 #define SF32LB52_BT_TRACE          0
 #define SF32LB52_BT_H4_CMD         0x01
 
+/* Set to 0 to compile out all Extended Advertising HCI diagnostics. */
+
+#define OV_BLE_HCI_ADV_DIAG        1
+
+#ifndef OV_BLE_HCI_TERM_RX_DIAG
+#  define OV_BLE_HCI_TERM_RX_DIAG  0
+#endif
+
+#ifndef OV_BLE_HCI_RX_RING_SNAPSHOT_DIAG
+#  define OV_BLE_HCI_RX_RING_SNAPSHOT_DIAG 0
+#endif
+
+#define OV_BLE_HCI_EXT_ADV_DATA    0x2037
+#define OV_BLE_HCI_EXT_SCAN_RSP    0x2038
+
+static uint16_t sf32lb52_bt_diag_get_le16(const uint8_t *data)
+{
+  return (uint16_t)data[0] | ((uint16_t)data[1] << 8);
+}
+
+static bool sf32lb52_bt_diag_opcode(uint16_t opcode)
+{
+  return opcode == OV_BLE_HCI_EXT_ADV_DATA ||
+         opcode == OV_BLE_HCI_EXT_SCAN_RSP;
+}
+
+#if OV_BLE_HCI_ADV_DIAG
+static void sf32lb52_bt_diag_rx_chunk(const uint8_t *data, size_t len,
+                                     uint32_t rd_ptr, uint32_t wr_ptr)
+{
+  size_t offset = 0;
+
+  while (offset + 3 <= len)
+    {
+      size_t packet_len;
+      uint16_t opcode;
+      uint8_t event;
+
+      if (data[offset] != 0x04)
+        {
+          return;
+        }
+
+      event = data[offset + 1];
+      packet_len = 3 + data[offset + 2];
+      if (packet_len > len - offset)
+        {
+          return;
+        }
+
+      if (event == 0x0e && packet_len >= 7)
+        {
+          opcode = sf32lb52_bt_diag_get_le16(&data[offset + 4]);
+        }
+      else if (event == 0x0f && packet_len >= 7)
+        {
+          opcode = sf32lb52_bt_diag_get_le16(&data[offset + 5]);
+        }
+      else
+        {
+          offset += packet_len;
+          continue;
+        }
+
+      if (sf32lb52_bt_diag_opcode(opcode))
+        {
+          syslog(LOG_INFO,
+                 "ov_ble_hci_adv_diag adapter_rx mailbox=drained event=0x%02x len=%lu opcode=0x%04x rd=%08lx wr=%08lx\n",
+                 event, (unsigned long)packet_len, opcode,
+                 (unsigned long)rd_ptr, (unsigned long)wr_ptr);
+        }
+
+      offset += packet_len;
+    }
+}
+#endif
+
+#if OV_BLE_HCI_TERM_RX_DIAG
+#  define OV_BLE_HCI_TERM_EVT_LEN  6
+
+struct sf32lb52_bt_term_rx_diag_s
+{
+  uint8_t type;
+  uint8_t header[4];
+  uint8_t header_len;
+  uint8_t header_need;
+  uint8_t payload[OV_BLE_HCI_TERM_EVT_LEN];
+  uint8_t payload_len;
+  uint16_t payload_remaining;
+  bool target;
+  uint32_t sequence;
+};
+
+static void sf32lb52_bt_term_rx_diag_reset(
+    struct sf32lb52_bt_term_rx_diag_s *diag)
+{
+  diag->type = 0;
+  diag->header_len = 0;
+  diag->header_need = 0;
+  diag->payload_len = 0;
+  diag->payload_remaining = 0;
+  diag->target = false;
+}
+
+static uint8_t sf32lb52_bt_term_rx_diag_header_len(uint8_t type)
+{
+  switch (type)
+    {
+      case 0x01:
+      case 0x03:
+        return 3;
+
+      case 0x02:
+      case 0x05:
+        return 4;
+
+      case 0x04:
+        return 2;
+
+      default:
+        return 0;
+    }
+}
+
+static uint16_t sf32lb52_bt_term_rx_diag_payload_len(
+    const struct sf32lb52_bt_term_rx_diag_s *diag)
+{
+  switch (diag->type)
+    {
+      case 0x01:
+      case 0x03:
+        return diag->header[2];
+
+      case 0x02:
+        return (uint16_t)diag->header[2] |
+               ((uint16_t)diag->header[3] << 8);
+
+      case 0x04:
+        return diag->header[1];
+
+      case 0x05:
+        return ((uint16_t)diag->header[2] |
+                ((uint16_t)diag->header[3] << 8)) & 0x3fff;
+
+      default:
+        return 0;
+    }
+}
+
+static void sf32lb52_bt_term_rx_diag_chunk(
+    struct sf32lb52_bt_term_rx_diag_s *diag,
+    const uint8_t *data, size_t len, uint32_t rd_ptr, uint32_t wr_ptr,
+    size_t read_len, uint32_t *first_sequence, uint32_t *event_count)
+{
+  size_t offset = 0;
+
+  while (offset < len)
+    {
+      if (diag->type == 0)
+        {
+          diag->type = data[offset++];
+          diag->header_need =
+              sf32lb52_bt_term_rx_diag_header_len(diag->type);
+          if (diag->header_need == 0)
+            {
+              sf32lb52_bt_term_rx_diag_reset(diag);
+            }
+
+          continue;
+        }
+
+      if (diag->header_len < diag->header_need)
+        {
+          diag->header[diag->header_len++] = data[offset++];
+          if (diag->header_len < diag->header_need)
+            {
+              continue;
+            }
+
+          diag->payload_remaining =
+              sf32lb52_bt_term_rx_diag_payload_len(diag);
+          diag->target = diag->type == 0x04 &&
+                         diag->header[0] == 0x3e &&
+                         diag->header[1] == OV_BLE_HCI_TERM_EVT_LEN;
+          if (diag->payload_remaining == 0)
+            {
+              sf32lb52_bt_term_rx_diag_reset(diag);
+            }
+
+          continue;
+        }
+
+      if (diag->target && diag->payload_len < sizeof(diag->payload))
+        {
+          diag->payload[diag->payload_len++] = data[offset];
+        }
+
+      offset++;
+      diag->payload_remaining--;
+      if (diag->payload_remaining == 0)
+        {
+          if (diag->target &&
+              diag->payload_len == OV_BLE_HCI_TERM_EVT_LEN &&
+              diag->payload[0] == 0x12)
+            {
+              uint16_t conn_handle =
+                  (uint16_t)diag->payload[3] |
+                  ((uint16_t)diag->payload[4] << 8);
+              uint32_t sequence = ++diag->sequence;
+
+              if (*event_count == 0)
+                {
+                  *first_sequence = sequence;
+                }
+
+              (*event_count)++;
+              syslog(LOG_INFO,
+                     "ov_ble_hci_term_rx_diag term_rx copied seq=%lu rd=%08lx wr=%08lx read_len=%lu status=0x%02x adv_handle=%u conn_handle=0x%04x count=%u\n",
+                     (unsigned long)sequence, (unsigned long)rd_ptr,
+                     (unsigned long)wr_ptr, (unsigned long)read_len,
+                     diag->payload[1], diag->payload[2], conn_handle,
+                     diag->payload[5]);
+            }
+
+          sf32lb52_bt_term_rx_diag_reset(diag);
+        }
+    }
+}
+#endif
+
 typedef enum
 {
   SF32LB52_BT_STATUS_IDLE = 0,
@@ -70,10 +301,27 @@ struct sf32lb52_bt_env_s
   bool rx_worker_running;
   uint32_t rx_read_idx_mirror;
   uint32_t rx_count;
+#if OV_BLE_HCI_TERM_RX_DIAG
+  struct sf32lb52_bt_term_rx_diag_s term_rx_diag;
+#endif
 };
 
 static struct sf32lb52_bt_env_s g_sf32lb52_bt_env;
 static sf32lb52_bt_status_t g_sf32lb52_bt_status = SF32LB52_BT_STATUS_IDLE;
+
+#if OV_BLE_HCI_RX_RING_SNAPSHOT_DIAG
+struct sf32lb52_bt_rx_snapshot_diag_s
+{
+  uint32_t mailbox_count;
+  uint32_t worker_count;
+  uint32_t drain_count;
+  uint32_t copied_bytes;
+  uint32_t callback_count;
+  uint32_t sequence;
+};
+
+static struct sf32lb52_bt_rx_snapshot_diag_s g_sf32lb52_bt_rx_snapshot_diag;
+#endif
 static ipc_hw_q_handle_t g_sf32lb52_bt_tx_hw =
 {
   .ch_id = SF32LB52_BT_QID / IPC_HW_QUEUE_NUM,
@@ -422,6 +670,13 @@ static void sf32lb52_bt_rx_worker(FAR void *arg)
 {
   struct sf32lb52_bt_env_s *env = arg;
 
+#if OV_BLE_HCI_RX_RING_SNAPSHOT_DIAG
+  irqstate_t diag_flags = enter_critical_section();
+  g_sf32lb52_bt_rx_snapshot_diag.worker_count++;
+  g_sf32lb52_bt_rx_snapshot_diag.sequence++;
+  leave_critical_section(diag_flags);
+#endif
+
   for (;;)
     {
       irqstate_t flags;
@@ -434,6 +689,10 @@ static void sf32lb52_bt_rx_worker(FAR void *arg)
           int ret;
           struct circular_buf *rx_ring;
           uint32_t wr_ptr;
+#if OV_BLE_HCI_TERM_RX_DIAG
+          uint32_t term_first_sequence = 0;
+          uint32_t term_event_count = 0;
+#endif
 
           flags = enter_critical_section();
 
@@ -504,6 +763,14 @@ static void sf32lb52_bt_rx_worker(FAR void *arg)
               break;
             }
 
+#if OV_BLE_HCI_TERM_RX_DIAG
+          sf32lb52_bt_term_rx_diag_chunk(&env->term_rx_diag,
+                                         env->data_buf, read_len,
+                                         env->rx_read_idx_mirror, wr_ptr,
+                                         read_len, &term_first_sequence,
+                                         &term_event_count);
+#endif
+
           env->rx_read_idx_mirror = sf32lb52_bt_ring_advance(
               env->rx_read_idx_mirror, read_len, rx_ring->buffer_size);
           rx_ring->read_idx_mirror = env->rx_read_idx_mirror;
@@ -515,7 +782,18 @@ static void sf32lb52_bt_rx_worker(FAR void *arg)
 
           env->rx_count++;
 
+#if OV_BLE_HCI_RX_RING_SNAPSHOT_DIAG
+          g_sf32lb52_bt_rx_snapshot_diag.drain_count++;
+          g_sf32lb52_bt_rx_snapshot_diag.copied_bytes += read_len;
+          g_sf32lb52_bt_rx_snapshot_diag.sequence++;
+#endif
+
           leave_critical_section(flags);
+
+#if OV_BLE_HCI_ADV_DIAG
+          sf32lb52_bt_diag_rx_chunk(env->data_buf, read_len,
+                                    env->rx_read_idx_mirror, wr_ptr);
+#endif
 
         #if SF32LB52_BT_TRACE
              syslog(LOG_INFO,
@@ -530,7 +808,21 @@ static void sf32lb52_bt_rx_worker(FAR void *arg)
               continue;
             }
 
+#if OV_BLE_HCI_RX_RING_SNAPSHOT_DIAG
+          flags = enter_critical_section();
+          g_sf32lb52_bt_rx_snapshot_diag.callback_count++;
+          g_sf32lb52_bt_rx_snapshot_diag.sequence++;
+          leave_critical_section(flags);
+#endif
           ret = env->notify_host(env->data_buf, read_len);
+#if OV_BLE_HCI_TERM_RX_DIAG
+          for (uint32_t i = 0; i < term_event_count; i++)
+            {
+              syslog(LOG_INFO,
+                     "ov_ble_hci_term_rx_diag term_rx callback seq=%lu ret=%d\n",
+                     (unsigned long)(term_first_sequence + i), ret);
+            }
+#endif
           if (ret < 0)
             {
               syslog(LOG_ERR, "sf32lb52 bt rx callback: %d\n", ret);
@@ -573,6 +865,10 @@ static int32_t sf32lb52_bt_rx_ind(ipc_queue_handle_t handle, size_t size)
     }
 
   flags = enter_critical_section();
+#if OV_BLE_HCI_RX_RING_SNAPSHOT_DIAG
+  g_sf32lb52_bt_rx_snapshot_diag.mailbox_count++;
+  g_sf32lb52_bt_rx_snapshot_diag.sequence++;
+#endif
   env->rx_work_pending = true;
   queue_work = !env->rx_worker_running && work_available(&env->rx_work);
   if (queue_work)
@@ -617,6 +913,63 @@ static int32_t sf32lb52_bt_rx_ind(ipc_queue_handle_t handle, size_t size)
     }
 
   return OK;
+}
+
+int sf32lb52_bt_rx_ring_snapshot(
+    struct bt_hci_rx_ring_snapshot_s *snapshot)
+{
+#if OV_BLE_HCI_RX_RING_SNAPSHOT_DIAG
+  struct circular_buf *rx_ring;
+  irqstate_t flags;
+
+  if (snapshot == NULL)
+    {
+      return -EINVAL;
+    }
+
+  if (up_interrupt_context())
+    {
+      return -EPERM;
+    }
+
+  up_invalidate_dcache((uintptr_t)SF32LB52_BT_RX_BUF_ADDR,
+                       (uintptr_t)SF32LB52_BT_RX_BUF_ADDR +
+                       sizeof(struct circular_buf));
+
+  flags = enter_critical_section();
+  if (g_sf32lb52_bt_status != SF32LB52_BT_STATUS_ENABLED ||
+      !g_sf32lb52_bt_env.queue_open)
+    {
+      leave_critical_section(flags);
+      return -ENODEV;
+    }
+
+  rx_ring = (struct circular_buf *)SF32LB52_BT_RX_BUF_ADDR;
+  if (!sf32lb52_bt_rx_ring_valid(rx_ring))
+    {
+      leave_critical_section(flags);
+      return -EIO;
+    }
+
+  snapshot->ring_read_mirror = rx_ring->read_idx_mirror;
+  snapshot->ring_write_mirror = rx_ring->write_idx_mirror;
+  snapshot->local_read_mirror = g_sf32lb52_bt_env.rx_read_idx_mirror;
+  snapshot->mailbox_count = g_sf32lb52_bt_rx_snapshot_diag.mailbox_count;
+  snapshot->worker_count = g_sf32lb52_bt_rx_snapshot_diag.worker_count;
+  snapshot->drain_count = g_sf32lb52_bt_rx_snapshot_diag.drain_count;
+  snapshot->copied_bytes = g_sf32lb52_bt_rx_snapshot_diag.copied_bytes;
+  snapshot->callback_count = g_sf32lb52_bt_rx_snapshot_diag.callback_count;
+  snapshot->complete_h4_count = 0;
+  snapshot->forwarded_h4_count = 0;
+  snapshot->sequence = g_sf32lb52_bt_rx_snapshot_diag.sequence;
+  snapshot->last_opcode = 0;
+  snapshot->last_h4_type = 0;
+  snapshot->last_event = 0;
+  leave_critical_section(flags);
+  return OK;
+#else
+  return -ENOSYS;
+#endif
 }
 
 static int sf32lb52_bt_mailbox_init(void)
@@ -894,6 +1247,10 @@ int sf32lb52_host_send_packet(const uint8_t *data, uint16_t len)
   size_t chunks;
   uint32_t wr_ptr;
   int ret;
+#if OV_BLE_HCI_ADV_DIAG
+  uint16_t diag_opcode = 0;
+  bool diag_command = false;
+#endif
 
   if (data == NULL || len == 0)
     {
@@ -905,6 +1262,14 @@ int sf32lb52_host_send_packet(const uint8_t *data, uint16_t len)
     {
       return -ENODEV;
     }
+
+#if OV_BLE_HCI_ADV_DIAG
+  if (len >= 4 && data[0] == SF32LB52_BT_H4_CMD)
+    {
+      diag_opcode = sf32lb52_bt_diag_get_le16(&data[1]);
+      diag_command = sf32lb52_bt_diag_opcode(diag_opcode);
+    }
+#endif
 
   offset = 0;
   remaining = len;
@@ -974,7 +1339,35 @@ int sf32lb52_host_send_packet(const uint8_t *data, uint16_t len)
 
   if (data[0] == SF32LB52_BT_H4_CMD)
     {
+#if OV_BLE_HCI_ADV_DIAG
+      if (diag_command)
+        {
+          uint32_t rd_diag;
+          uint32_t wr_diag;
+
+          rd_diag = tx_ring->read_idx_mirror;
+          wr_diag = tx_ring->write_idx_mirror;
+          syslog(LOG_INFO,
+                 "ov_ble_hci_adv_diag adapter_tx opcode=0x%04x h4_len=%u phase=published rd=%08lx wr=%08lx result=0\n",
+                 diag_opcode, len, (unsigned long)rd_diag,
+                 (unsigned long)wr_diag);
+        }
+#endif
       ret = sf32lb52_bt_wait_tx_idle(tx_ring);
+#if OV_BLE_HCI_ADV_DIAG
+      if (diag_command)
+        {
+          uint32_t rd_diag;
+          uint32_t wr_diag;
+
+          rd_diag = tx_ring->read_idx_mirror;
+          wr_diag = tx_ring->write_idx_mirror;
+          syslog(LOG_INFO,
+                 "ov_ble_hci_adv_diag adapter_tx opcode=0x%04x h4_len=%u phase=consumed rd=%08lx wr=%08lx result=%d\n",
+                 diag_opcode, len, (unsigned long)rd_diag,
+                 (unsigned long)wr_diag, ret);
+        }
+#endif
       if (ret < 0)
         {
           return ret;

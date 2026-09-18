@@ -35,5 +35,9 @@
 
 #define BUTTON_KEY2_BIT  (1 << BUTTON_KEY2)
 
-#endif /* __VENDOR_SIFLI_BOARDS_SF32LB52_LCKFB_HUANGSHAN_PI_INCLUDE_BOARD_H */
+typedef void (*board_imu_int1_callback_t)(void *arg);
 
+int board_imu_int1_enable(board_imu_int1_callback_t callback, void *arg);
+int board_imu_int1_disable(void);
+
+#endif /* __VENDOR_SIFLI_BOARDS_SF32LB52_LCKFB_HUANGSHAN_PI_INCLUDE_BOARD_H */
