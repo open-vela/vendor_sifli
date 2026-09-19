@@ -41,6 +41,9 @@
 #include "drv_io.h"
 #include "sifli_gpio.h"
 
+/* Chip-level I2C bus init (defined in sifli_i2c.c, no public header yet) */
+struct i2c_master_s *sifli_i2cbus_initialize(int port);
+
 #include <nuttx/arch.h>
 #include <nuttx/board.h>
 #include <nuttx/lcd/lcd.h>
@@ -67,6 +70,10 @@ extern int sf32lb_adc_init(const char *devpath);
 
 #ifdef CONFIG_CDCACM
 #  include <nuttx/usb/cdcacm.h>
+#endif
+
+#ifdef CONFIG_NET_CDCECM
+#  include <nuttx/usb/cdcecm.h>
 #endif
 
 #ifdef CONFIG_MTD
@@ -503,11 +510,35 @@ int sf32lb52_lchspi_ulp_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_FS_TMPFS
+  /* The agent keeps its config/skills/memory under /data.  NOR write/erase
+   * is disabled while executing from XIP, so back /data with tmpfs for now.
+   */
+  ret = mkdir("/data", 0755);
+  if (ret < 0 && errno != EEXIST)
+    {
+      serr("WARN: mkdir /data failed: %d\n", errno);
+    }
+  ret = mount(NULL, "/data", "tmpfs", 0, NULL);
+  if (ret < 0)
+    {
+      serr("WARN: mount tmpfs /data failed: %d\n", ret);
+    }
+#endif
+
 #ifdef CONFIG_CDCACM
   ret = cdcacm_initialize(0, NULL);
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: cdcacm_initialize failed: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_NET_CDCECM
+  ret = cdcecm_initialize(0, NULL);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: cdcecm_initialize failed: %d\n", ret);
     }
 #endif
 

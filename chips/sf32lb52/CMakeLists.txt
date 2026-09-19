@@ -50,6 +50,10 @@ if(CONFIG_SF32LB52_USBDEV)
     list(APPEND SRCS sf32lb_usbdev.c)
 endif()
 
+if(CONFIG_SF32LB52_AUDCODEC)
+    list(APPEND SRCS sf32lb_audcodec.c)
+endif()
+
 set(IPC_QUEUE_SRCS
     ${NUTTX_CHIP_ABS_DIR}/ipc_queue/common/circular_buf.c
     ${NUTTX_CHIP_ABS_DIR}/ipc_queue/common/ipc_hw.c

@@ -36,6 +36,7 @@
 #include "nvic.h"
 #include "ram_vectors.h"
 #include "arm_internal.h"
+#include "sifli_start.h"
 
 #include "bf0_hal.h"
 

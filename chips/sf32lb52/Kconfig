@@ -36,6 +36,10 @@ endchoice
 
 menu "On-chip Peripheral RTOS Drivers"
 
+    config SF32LB52_AUDCODEC
+        bool "Enable AUDCODEC ADC capture path (on-board MEMS microphone)"
+        default n
+
     menuconfig BSP_USING_GPIO
         bool "Enable GPIO"
         select RT_USING_PIN
