@@ -33,4 +33,15 @@
  * Pre-processor Definitions
  ****************************************************************************/
 
+/****************************************************************************
+ * Public Function Prototypes
+ ****************************************************************************/
+
+/* Early printf, implemented in sifli_start.c.  Prints directly via
+ * arm_lowputc() before the system console is up (used by irq handlers
+ * to report fatal exceptions).
+ */
+
+int arm_lowprintf(const char *fmt, ...);
+
 #endif /* __VENDOR_SIFLI_CHIP_SF32LB52_SIFLI_START_H */
