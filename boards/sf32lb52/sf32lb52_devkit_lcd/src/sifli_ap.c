@@ -240,13 +240,15 @@ static int sf32lb52_lsm6ds3_initialize(FAR struct i2c_master_s *i2c)
    *   PA39 - I2C2 SDA
    *   PA40 - I2C2 SCL
    *   PA31 - INT
-   *   PA30 - sensor LDO enable, active high
+   *   PA30 - sensor LDO enable, active high (CONFLICTS with touch I2C SCL!)
+   *
+   * NOTE: PA30 is shared with the touch panel I2C1_SCL (BSP_PIN_Touch).
+   * We skip the LDO enable here to avoid clobbering the touch I2C bus.
+   * If the sensor needs a dedicated LDO, the hardware design must assign
+   * a different GPIO for it.
    */
 
-  HAL_PIN_Set(PAD_PA30, GPIO_A30, PIN_NOPULL, 1);
-  sifli_gpio_config(SF32LB52_LSM6DS3_LDO_PIN, GPIO_OUTPUT);
-  sifli_gpio_write(SF32LB52_LSM6DS3_LDO_PIN, true);
-  usleep(10000);
+  /* PA30 skipped — conflicts with touch I2C1_SCL on devkit_lcd board */
 
   HAL_PIN_Set(PAD_PA31, GPIO_A31, PIN_PULLUP, 1);
   sifli_gpio_config(SF32LB52_LSM6DS3_INT_PIN, GPIO_INPUT);
@@ -294,6 +296,7 @@ static int lcd_async_init_thread(int argc, FAR char *argv[])
 {
   int ret;
 
+  syslog(LOG_INFO, "LCD: lcd_async_init_thread started\n");
   ret = board_lcd_initialize();
   if (ret < 0)
     {
@@ -466,7 +469,7 @@ int sf32lb52_lchspi_ulp_bringup(void)
   /* Initialize I2C bus 0 on the touch panel pins. */
   struct i2c_master_s *i2c0 = NULL;
 
-  HAL_PIN_Set(PAD_PA37, I2C1_SCL, PIN_PULLUP, 1);
+  HAL_PIN_Set(PAD_PA30, I2C1_SCL, PIN_PULLUP, 1);
   HAL_PIN_Set(PAD_PA33, I2C1_SDA, PIN_PULLUP, 1);
 
   i2c0 = sifli_i2cbus_initialize(0);

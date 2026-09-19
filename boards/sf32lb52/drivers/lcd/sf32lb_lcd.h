@@ -70,7 +70,12 @@ typedef struct
         pixel_align           \
     }
 
-#define LCD_DRIVER_DELAY_MS(ms) up_mdelay(ms)
+/* Use usleep() instead of busy-wait up_mdelay() when running in thread
+ * context (which is the normal case for LCD driver init).  This yields the
+ * CPU to other threads during long panel waits (120 ms sleep-out, etc.).
+ */
+#include <unistd.h>
+#define LCD_DRIVER_DELAY_MS(ms) usleep((uint32_t)(ms) * 1000u)
 typedef enum
 {
     LCD_STATUS_NONE = 0,

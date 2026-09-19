@@ -93,7 +93,16 @@ static void HAL_LCDC_JDIParallelInit(LCDC_HandleTypeDef *lcdc);
 
 
 
-#define WAIT_LCDC_SINGLE_BUSY(lcdc) while((lcdc)->Instance->LCD_SINGLE & LCD_IF_LCD_SINGLE_LCD_BUSY)
+#define WAIT_LCDC_SINGLE_BUSY(lcdc) do { \
+    uint32_t _timeout_start = HAL_GetTick(); \
+    while(((lcdc)->Instance->LCD_SINGLE & LCD_IF_LCD_SINGLE_LCD_BUSY)) { \
+        if ((HAL_GetTick() - _timeout_start) > LCDC_TIMEOUT_SECONDS * 1000) { \
+            LCDC_LOG_E("LCDC SINGLE BUSY timeout!"); \
+            (lcdc)->ErrorCode |= HAL_LCDC_ERROR_TIMEOUT; \
+            break; \
+        } \
+    } \
+} while(0)
 #define GET_LCDC_SYSID(lcdc) ((LCDC1 == ((lcdc)->Instance))?CORE_ID_HCPU:CORE_ID_LCPU)
 #define LCDC_DELAY_NS(ns) HAL_Delay_us(((ns)/1000) + 1)
 
@@ -278,8 +287,12 @@ static HAL_StatusTypeDef SelectIntf(LCDC_HandleTypeDef *lcdc, HAL_LCDC_IF_TypeDe
             break;
         }
 
-        reg_v |= MAKE_REG_VAL(init->cfg.spi.cs_polarity,  LCD_IF_SPI_IF_CONF_SPI_CLK_POL_Msk,  LCD_IF_SPI_IF_CONF_SPI_CLK_POL_Pos);
-        reg_v |= MAKE_REG_VAL(!init->cfg.spi.clk_polarity, LCD_IF_SPI_IF_CONF_SPI_CLK_INIT_Msk, LCD_IF_SPI_IF_CONF_SPI_CLK_INIT_Pos);
+        reg_v |= MAKE_REG_VAL(init->cfg.spi.cs_polarity,  LCD_IF_SPI_IF_CONF_SPI_CS_POL_Msk,   LCD_IF_SPI_IF_CONF_SPI_CS_POL_Pos);
+        /* Note: Removed ! inversion on clk_polarity to match standard SPI convention:
+         * clk_polarity=0 -> CLK idle LOW (CPOL=0, SPI Mode 0/3)
+         * clk_polarity=1 -> CLK idle HIGH (CPOL=1, SPI Mode 1/2)
+         */
+        reg_v |= MAKE_REG_VAL(init->cfg.spi.clk_polarity, LCD_IF_SPI_IF_CONF_SPI_CLK_INIT_Msk, LCD_IF_SPI_IF_CONF_SPI_CLK_INIT_Pos);
         reg_v |= MAKE_REG_VAL(init->cfg.spi.clk_phase,    LCD_IF_SPI_IF_CONF_SPI_CLK_POL_Msk,  LCD_IF_SPI_IF_CONF_SPI_CLK_POL_Pos);
         reg_v |= MAKE_REG_VAL(init->cfg.spi.dummy_clock,  LCD_IF_SPI_IF_CONF_DUMMY_CYCLE_Msk,  LCD_IF_SPI_IF_CONF_DUMMY_CYCLE_Pos);
         reg_v |= LCD_IF_SPI_IF_CONF_SPI_CS_AUTO_DIS | LCD_IF_SPI_IF_CONF_SPI_CLK_AUTO_DIS | LCD_IF_SPI_IF_CONF_SPI_CS_NO_IDLE;
@@ -1612,6 +1625,12 @@ static HAL_StatusTypeDef _SendLayerData(LCDC_HandleTypeDef *lcdc, LCDC_AsyncMode
 
         if (LCDC_ASYNC_MODE == async_mode)
         {
+            /* Clear any stale interrupt state from previous transfer */
+            lcdc->Instance->SETTING &= ~LCD_IF_SETTING_EOF_MASK;
+            lcdc->Instance->IRQ = LCD_IF_IRQ_EOF_RAW_STAT | LCD_IF_IRQ_EOF_STAT;
+#ifdef LCDC_SUPPORT_LINE_DONE_IRQ
+            lcdc->Instance->IRQ = LCD_IF_IRQ_LINE_DONE_RAW_STAT | LCD_IF_IRQ_LINE_DONE_STAT;
+#endif
             /* unmask */
             lcdc->Instance->SETTING |= LCD_IF_SETTING_EOF_MASK;
 #ifdef LCDC_SUPPORT_LINE_DONE_IRQ
@@ -1634,13 +1653,23 @@ static HAL_StatusTypeDef _SendLayerData(LCDC_HandleTypeDef *lcdc, LCDC_AsyncMode
 
 static HAL_StatusTypeDef _WaitSendLayerDone(LCDC_HandleTypeDef *lcdc)
 {
+    uint32_t timeout_start = HAL_GetTick();
+
     if (0)
     {
     }
 #ifndef SOC_BF_Z0
     else if (HAL_LCDC_IS_DPI_IF(lcdc->Init.lcd_itf) || HAL_LCDC_IS_DSI_VID_IF(lcdc->Init.lcd_itf))
     {
-        while (0 == (lcdc->Instance->IRQ & LCD_IF_IRQ_DPIL_INTR_RAW_STAT_Msk));
+        while (0 == (lcdc->Instance->IRQ & LCD_IF_IRQ_DPIL_INTR_RAW_STAT_Msk))
+        {
+            if ((HAL_GetTick() - timeout_start) > LCDC_TIMEOUT_SECONDS * 1000)
+            {
+                LCDC_LOG_E("LCDC DPI wait timeout!");
+                lcdc->ErrorCode |= HAL_LCDC_ERROR_TIMEOUT;
+                return HAL_TIMEOUT;
+            }
+        }
 
         //Clear EOF IRQ.
         lcdc->Instance->IRQ = LCD_IF_IRQ_DPIL_INTR_RAW_STAT;
@@ -1648,7 +1677,15 @@ static HAL_StatusTypeDef _WaitSendLayerDone(LCDC_HandleTypeDef *lcdc)
 #endif
     else
     {
-        while (0 == (lcdc->Instance->IRQ & LCD_IF_IRQ_EOF_RAW_STAT));
+        while (0 == (lcdc->Instance->IRQ & LCD_IF_IRQ_EOF_RAW_STAT))
+        {
+            if ((HAL_GetTick() - timeout_start) > LCDC_TIMEOUT_SECONDS * 1000)
+            {
+                LCDC_LOG_E("LCDC EOF wait timeout!");
+                lcdc->ErrorCode |= HAL_LCDC_ERROR_TIMEOUT;
+                return HAL_TIMEOUT;
+            }
+        }
 
         //Clear EOF IRQ.
         lcdc->Instance->IRQ = LCD_IF_IRQ_EOF_RAW_STAT;
@@ -2299,7 +2336,11 @@ static HAL_StatusTypeDef LCDC_HW_Init(LCDC_HandleTypeDef *lcdc)
 
 __HAL_ROM_USED HAL_StatusTypeDef HAL_LCDC_Init(LCDC_HandleTypeDef *lcdc)
 {
-    LCDC_HW_Init(lcdc);
+    HAL_StatusTypeDef st = LCDC_HW_Init(lcdc);
+    if (st != HAL_OK)
+    {
+        return st;
+    }
 
     /*Enable default layer only*/
     lcdc->Layer[HAL_LCDC_LAYER_0].disable = (HAL_LCDC_LAYER_DEFAULT == HAL_LCDC_LAYER_0) ? 0 : 1;
@@ -2338,6 +2379,14 @@ __HAL_ROM_USED HAL_StatusTypeDef HAL_LCDC_DeInit(LCDC_HandleTypeDef *lcdc)
     }
 
     WaitBusy2(lcdc);
+
+    /* Disable LCDC module clock */
+    HAL_RCC_DisableModule((lcdc->Instance == hwp_lcdc1) ? RCC_MOD_LCDC1 : RCC_MOD_LCDC2);
+
+    /* Clear internal state */
+    lcdc->State = HAL_LCDC_STATE_RESET;
+    lcdc->ErrorCode = HAL_LCDC_ERROR_NONE;
+    lcdc->Lock = HAL_UNLOCKED;
 
     return HAL_OK;
 }
@@ -2521,14 +2570,16 @@ __HAL_ROM_USED HAL_StatusTypeDef HAL_LCDC_WriteDatas(LCDC_HandleTypeDef *lcdc, u
         HAL_LCDC_ASSERT(NULL != p_data);
     }
 
-    if (HAL_TIMEOUT == WaitBusy(lcdc)) return HAL_TIMEOUT;
-
-
     __HAL_LCDC_LOCK(lcdc);
     if (HAL_LCDC_STATE_READY != lcdc->State)
     {
         __HAL_LCDC_UNLOCK(lcdc);
         return HAL_BUSY;
+    }
+    if (HAL_TIMEOUT == WaitBusy(lcdc))
+    {
+        __HAL_LCDC_UNLOCK(lcdc);
+        return HAL_TIMEOUT;
     }
 
 
@@ -2811,6 +2862,12 @@ __HAL_ROM_USED HAL_StatusTypeDef HAL_LCDC_LayerSetData(
     lcdc->Layer[layeridx].data_area.x1 = x1;
     lcdc->Layer[layeridx].data_area.y1 = y1;
 
+    /* Reset total_width so LayerUpdate derives line width from data_area.
+     * Without this, a stale value from a prior LayerSetDataExt call
+     * corrupts the hardware CONFIG WIDTH register and v_mirror address.
+     */
+    lcdc->Layer[layeridx].total_width = INVALID_TOTAL_WIDTH;
+
     return HAL_OK;
 }
 
@@ -3058,6 +3115,7 @@ __HAL_ROM_USED HAL_StatusTypeDef HAL_LCDC_SendLayerData2Reg_IT(LCDC_HandleTypeDe
         if (HAL_OK != err)
         {
             lcdc->State = HAL_LCDC_STATE_READY;
+            g_LCDC_CpltCallback = NULL;  /* Clear stale callback on error */
         }
     }
 
@@ -5343,6 +5401,20 @@ __HAL_ROM_USED void HAL_LCDC_IRQHandler(LCDC_HandleTypeDef *lcdc)
     if (irq_value & LCD_IF_IRQ_ICB_OF_RAW_STAT)
     {
         lcdc->ErrorCode |= HAL_LCDC_ERROR_OVERFLOW;
+        /* Reset state so subsequent transfers are not stuck at HAL_BUSY */
+        lcdc->State = HAL_LCDC_STATE_READY;
+        lcdc->Lock  = HAL_UNLOCKED;
+        /* Clear completion callback to prevent double-post of semaphore */
+        g_LCDC_CpltCallback = NULL;
+        /* Clear per-handle callbacks for consistency */
+        lcdc->XferCpltCallback = NULL;
+        /* Invoke error callback to unblock waiting threads */
+        cb = lcdc->XferErrorCallback;
+        if (cb)
+        {
+            lcdc->XferErrorCallback = NULL;
+            cb(lcdc);
+        }
     }
 
 #if (!defined(SF32LB55X))&&defined(LCDC_SUPPORT_LINE_DONE_IRQ)
@@ -5375,8 +5447,6 @@ __HAL_ROM_USED void HAL_LCDC_IRQHandler(LCDC_HandleTypeDef *lcdc)
             LCDC_LOG_D("LAYER0_SRC=%x CFG2=%x CFG3=%x \r\n", lcdc->Instance->LAYER0_SRC,
                        lcdc->Instance->DPI_IF_CONF2,
                        lcdc->Instance->DPI_IF_CONF3);
-
-            lcdc->ErrorCode |= HAL_LCDC_ERROR_UNDERRUN;
             if (HAL_LCDC_IS_PTC_AUX_IF(lcdc->Init.lcd_itf))
             {
                 HAL_LCDC_ASSERT(0); //Check DPI under run error.

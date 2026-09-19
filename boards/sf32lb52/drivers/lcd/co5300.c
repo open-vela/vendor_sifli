@@ -9,6 +9,7 @@
 
 
 #include <sfconfig.h>
+#include <syslog.h>
 #include "string.h"
 #include "sf32lb_lcd.h"
 
@@ -92,6 +93,7 @@
 #define REG_NORMAL_DISPLAY_ON  0x13
 #define REG_PARTIAL_DISPLAY    0x12
 #define REG_DISPLAY_INVERSION  0x21
+#define REG_DISPLAY_INVERSION_OFF 0x20
 #define REG_ALL_PIXEL_OFF      0x22
 #define REG_ALL_PIXEL_ON       0x23
 #define REG_DISPLAY_OFF        0x28
@@ -144,8 +146,8 @@ static LCDC_InitTypeDef lcdc_int_cfg_qadspi =
 #endif /* LCD_CO5300_VSYNC_ENABLE */
             .vsyn_polarity = 1,
             //default_vbp=2, frame rate=82, delay=115us,
-            //TODO: use us to define delay instead of cycle, delay_cycle=115*48
-            .vsyn_delay_us = 0,
+            //delay_cycle=115*48
+            .vsyn_delay_us = 115,
             .hsyn_num = 0,
         },
     },
@@ -157,7 +159,7 @@ static LCDC_InitTypeDef lcdc_int_cfg;
 
 static uint32_t LCD_ReadID(LCDC_HandleTypeDef *hlcdc);
 static void LCD_SetRegion(LCDC_HandleTypeDef *hlcdc, uint16_t Xpos0, uint16_t Ypos0, uint16_t Xpos1, uint16_t Ypos1);
-static void     LCD_WriteReg(LCDC_HandleTypeDef *hlcdc, uint16_t LCD_Reg, uint8_t *Parameters, uint32_t NbParameters);
+static HAL_StatusTypeDef LCD_WriteReg(LCDC_HandleTypeDef *hlcdc, uint16_t LCD_Reg, uint8_t *Parameters, uint32_t NbParameters);
 static uint32_t LCD_ReadData(LCDC_HandleTypeDef *hlcdc, uint16_t RegValue, uint8_t ReadSize);
 static void LCD_ReadMode(LCDC_HandleTypeDef *hlcdc, bool enable);
 
@@ -187,48 +189,61 @@ static void LCD_Clear(LCDC_HandleTypeDef *hlcdc)
 {
     /*Clear gram*/
     HAL_LCDC_Next_Frame_TE(hlcdc, 0);
-    LCD_SetRegion(hlcdc, 0, 0, LCD_PIXEL_WIDTH, LCD_PIXEL_HEIGHT);
-    HAL_LCDC_LayerSetFormat(hlcdc, HAL_LCDC_LAYER_DEFAULT, LCDC_PIXEL_FORMAT_RGB565);
+    LCD_SetRegion(hlcdc, 0, 0, LCD_PIXEL_WIDTH - 1, LCD_PIXEL_HEIGHT - 1);
+    HAL_LCDC_LayerSetFormat(hlcdc, HAL_LCDC_LAYER_DEFAULT, lcdc_int_cfg.color_mode);
     HAL_LCDC_LayerDisable(hlcdc, HAL_LCDC_LAYER_DEFAULT);
     HAL_LCDC_SetBgColor(hlcdc, 0, 0, 0);
-    HAL_LCDC_SendLayerData2Reg(hlcdc, ((0x32 << 24) | (REG_WRITE_RAM << 8)), 4);
+    HAL_LCDC_SendLayerData2Reg(hlcdc, ((0x32u << 24) | (REG_WRITE_RAM << 8)), 4);
     HAL_LCDC_LayerEnable(hlcdc, HAL_LCDC_LAYER_DEFAULT);
 
 }
 
 
-static void LCD_Drv_Init(LCDC_HandleTypeDef *hlcdc)
+static int LCD_Drv_Init(LCDC_HandleTypeDef *hlcdc)
 {
     uint8_t   parameter[14];
+    HAL_StatusTypeDef st;
+
+    lcdinfo("[co5300] LCD_Drv_Init start\n");
 
     /* Initialize CO5300 low level bus layer ----------------------------------*/
     memcpy(&hlcdc->Init, &lcdc_int_cfg, sizeof(LCDC_InitTypeDef));
+    lcdinfo("[co5300] LCDC interface: %d, freq: %d\n", lcdc_int_cfg.lcd_itf, lcdc_int_cfg.freq);
+
     if (HAL_LCDC_Init(hlcdc) != HAL_OK)
     {
-        lcdwarn("[co5300] HAL_LCDC_Init failed");
-        return;
+        lcderr("[co5300] HAL_LCDC_Init failed");
+        return -EIO;
     }
+    lcdinfo("[co5300] HAL_LCDC_Init OK\n");
 
-    BSP_LCD_Reset(1);
-    LCD_DRIVER_DELAY_MS(10);
-    BSP_LCD_Reset(0);//Reset LCD
-    LCD_DRIVER_DELAY_MS(10);
-    BSP_LCD_Reset(1);
-    LCD_DRIVER_DELAY_MS(120);
+    /* Note: Hardware reset was already performed in BSP_LCD_PowerUp().
+     * Skip duplicate reset here to avoid wasting 260ms and potential
+     * state corruption from multiple reset pulses.
+     */
 
-    LCD_WriteReg(hlcdc, 0x01, (uint8_t *)NULL, 0);
+    lcdinfo("[co5300] Sending SW_RESET\n");
+    st = LCD_WriteReg(hlcdc, 0x01, (uint8_t *)NULL, 0);
+    if (st != HAL_OK)
+    {
+        lcderr("[co5300] SW_RESET failed, st=%d", st);
+        return -EIO;
+    }
     LCD_DRIVER_DELAY_MS(120);
+    lcdinfo("[co5300] SW_RESET done\n");
 
     /* ReadID is informational only - some panels do not respond reliably
      * to ID queries on USB-only power but still init/draw correctly.
      * Log mismatch for diagnostics but proceed with panel init regardless.
      */
+    lcdinfo("[co5300] Reading LCD ID\n");
     {
         uint32_t pid = LCD_ReadID(hlcdc);
+        syslog(LOG_INFO, "[co5300] ReadID=0x%lx expected 0x%x\n",
+                (unsigned long)pid, LCD_ID);
         if (pid != LCD_ID)
         {
-            lcdwarn("[co5300] ReadID=0x%lx expected 0x%x, init anyway",
-                    (unsigned long)pid, LCD_ID);
+            lcdwarn("[co5300] ReadID mismatch, init anyway");
         }
     }
 
@@ -251,32 +266,60 @@ static void LCD_Drv_Init(LCDC_HandleTypeDef *hlcdc)
 #else
     parameter[0] = 0x20;
 #endif
+    lcdinfo("[co5300] Password unlock\n");
     LCD_WriteReg(hlcdc, REG_CMD_PAGE_SWITCH, parameter, 1); //Pass word unlock
     parameter[0] = 0x5A;
     LCD_WriteReg(hlcdc, REG_PASSWD1, parameter, 1);
     parameter[0] = 0x59;
     LCD_WriteReg(hlcdc, REG_PASSWD2, parameter, 1);
 
-    parameter[0] = 0x20;
-    LCD_WriteReg(hlcdc, REG_CMD_PAGE_SWITCH, parameter, 1); //Pass word lock
+    /* Allow the panel time to process the unlock before re-locking and
+     * switching to command page 0.  Without this delay some CO5300 modules
+     * occasionally miss the subsequent SPI-mode / color-mode writes.
+     */
+    LCD_DRIVER_DELAY_MS(10);
+
+    /* Password lock: lock PASSWD1 on page 0x00, then PASSWD2 on page 0x20 */
+    parameter[0] = 0x00;
+    LCD_WriteReg(hlcdc, REG_CMD_PAGE_SWITCH, parameter, 1); //Pass word lock page 0
     parameter[0] = 0xA5;
     LCD_WriteReg(hlcdc, REG_PASSWD1, parameter, 1);
+
+    parameter[0] = 0x20;
+    LCD_WriteReg(hlcdc, REG_CMD_PAGE_SWITCH, parameter, 1); //Pass word lock page 0x20
     parameter[0] = 0xA5;
     LCD_WriteReg(hlcdc, REG_PASSWD2, parameter, 1);
 
+    lcdinfo("[co5300] Setting SPI mode and color format\n");
     parameter[0] = 0x00;
     LCD_WriteReg(hlcdc, REG_CMD_PAGE_SWITCH, parameter, 1);
     parameter[0] = 0x80;
-    LCD_WriteReg(hlcdc, REG_SET_SPI_MODE, parameter, 1);
-    parameter[0] = 0x55;
-    LCD_WriteReg(hlcdc, REG_COLOR_MODE, parameter, 1);
+    st = LCD_WriteReg(hlcdc, REG_SET_SPI_MODE, parameter, 1);
+    if (st != HAL_OK)
+    {
+        lcderr("[co5300] Set SPI mode failed, st=%d", st);
+        return -EIO;
+    }
+    /* Set COLMOD based on the configured color mode */
+    if (lcdc_int_cfg.color_mode == LCDC_PIXEL_FORMAT_RGB888)
+        parameter[0] = 0xF7;
+    else
+        parameter[0] = 0xD5;
+    st = LCD_WriteReg(hlcdc, REG_COLOR_MODE, parameter, 1);
+    if (st != HAL_OK)
+    {
+        lcderr("[co5300] Set color mode failed, st=%d", st);
+        return -EIO;
+    }
 #ifdef LCD_CO5300_VSYNC_ENABLE
     parameter[0] = 0x00;
     LCD_WriteReg(hlcdc, REG_TEARING_EFFECT_ON, parameter, 1);
 #else
     LCD_WriteReg(hlcdc, REG_TEARING_EFFECT_OFF, (uint8_t *)NULL, 0);
 #endif
-    parameter[0] = 0x20;
+    lcdinfo("[co5300] Setting brightness\n");
+    /* 0x60 = BCTRL(bit6)=1 + BL(bit5)=1: Enable brightness control for AMOLED */
+    parameter[0] = 0x60;
     LCD_WriteReg(hlcdc, REG_WRITE_CTRL_DISPLAY, parameter, 1);
     parameter[0] = 0x7F;
     LCD_WriteReg(hlcdc, REG_WBRIGHT, parameter, 1);
@@ -284,6 +327,19 @@ static void LCD_Drv_Init(LCDC_HandleTypeDef *hlcdc)
     parameter[0] = 0xff;
     LCD_WriteReg(hlcdc, REG_WRHBMDISBV, parameter, 1);
 
+    lcdinfo("[co5300] Sleep out\n");
+    st = LCD_WriteReg(hlcdc, REG_SLEEP_OUT, (uint8_t *)NULL, 0);
+    if (st != HAL_OK)
+    {
+        lcderr("[co5300] Sleep out failed, st=%d", st);
+        return -EIO;
+    }
+
+    //sleep out wait + normal display mode + display on
+    LCD_DRIVER_DELAY_MS(120);
+
+    /* Set display area after sleep out (MIPI DCS requires sleep out before param commands) */
+    lcdinfo("[co5300] Setting display area\n");
     parameter[0] = (COL_OFFSET >> 8) & 0xFF;
     parameter[1] = COL_OFFSET & 0xFF;
     parameter[2] = ((LCD_PIXEL_WIDTH + COL_OFFSET - 1) >> 8) & 0xFF;
@@ -295,13 +351,27 @@ static void LCD_Drv_Init(LCDC_HandleTypeDef *hlcdc)
     parameter[3] = (LCD_PIXEL_HEIGHT + ROW_OFFSET - 1) & 0xFF;
     LCD_WriteReg(hlcdc, REG_RASET, parameter, 4);
 
-    LCD_WriteReg(hlcdc, REG_SLEEP_OUT, (uint8_t *)NULL, 0);
+    /* Use the module's normal color polarity. The previous forced INVON
+     * inverted the UI palette on the DevKit's 390x450 panel. */
+    LCD_WriteReg(hlcdc, REG_DISPLAY_INVERSION_OFF, (uint8_t *)NULL, 0);
 
-    //sleep out+display on
-    LCD_DRIVER_DELAY_MS(120);
-    LCD_WriteReg(hlcdc, REG_DISPLAY_ON, (uint8_t *)NULL, 0);
+    /* Set normal display mode (MIPI DCS standard requirement) */
+    lcdinfo("[co5300] Normal display mode on\n");
+    LCD_WriteReg(hlcdc, REG_NORMAL_DISPLAY_ON, (uint8_t *)NULL, 0);
+
+    lcdinfo("[co5300] Display on\n");
+    st = LCD_WriteReg(hlcdc, REG_DISPLAY_ON, (uint8_t *)NULL, 0);
+    if (st != HAL_OK)
+    {
+        lcderr("[co5300] Display on failed, st=%d", st);
+        return -EIO;
+    }
     LCD_DRIVER_DELAY_MS(20);
+    syslog(LOG_INFO, "[co5300] initialized, power=0x%02lx format=0x%02lx\n",
+           (unsigned long)LCD_ReadData(hlcdc, REG_POWER_MODE, 1),
+           (unsigned long)LCD_ReadData(hlcdc, REG_COLOR_MODE, 1));
 
+    return OK;
 }
 
 
@@ -314,11 +384,21 @@ static void LCD_Drv_Init(LCDC_HandleTypeDef *hlcdc)
  */
 static void LCD_Init(LCDC_HandleTypeDef *hlcdc)
 {
+    int ret;
+
 #ifdef BSP_LCDC_USING_QADSPI
     memcpy(&lcdc_int_cfg, &lcdc_int_cfg_qadspi, sizeof(lcdc_int_cfg));
 #endif /* BSP_LCDC_USING_QADSPI */
 
-    LCD_Drv_Init(hlcdc);
+    ret = LCD_Drv_Init(hlcdc);
+    if (ret < 0)
+    {
+        lcderr("[co5300] LCD_Drv_Init failed: %d\n", ret);
+        return;
+    }
+
+    /* Clear GRAM to black so the display starts with defined content */
+    LCD_Clear(hlcdc);
 }
 
 
@@ -402,22 +482,22 @@ static void LCD_SetRegion(LCDC_HandleTypeDef *hlcdc, uint16_t Xpos0, uint16_t Yp
   */
 static void LCD_WritePixel(LCDC_HandleTypeDef *hlcdc, uint16_t Xpos, uint16_t Ypos, const uint8_t *RGBCode)
 {
-    uint8_t data = 0;
-
     /* Set Cursor */
     LCD_SetRegion(hlcdc, Xpos, Ypos, Xpos, Ypos);
-    LCD_WriteReg(hlcdc, REG_WRITE_RAM, (uint8_t *)RGBCode, 2);
+    uint32_t bpp = (lcdc_int_cfg.color_mode == LCDC_PIXEL_FORMAT_RGB888) ? 3 : 2;
+    LCD_WriteReg(hlcdc, REG_WRITE_RAM, (uint8_t *)RGBCode, bpp);
 }
 
 static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *hlcdc, const uint8_t *RGBCode, uint16_t Xpos0, uint16_t Ypos0, uint16_t Xpos1, uint16_t Ypos1)
 {
+    LCD_SetRegion(hlcdc, Xpos0, Ypos0, Xpos1, Ypos1);
     HAL_LCDC_LayerSetData(hlcdc, HAL_LCDC_LAYER_DEFAULT, (uint8_t *)RGBCode, Xpos0, Ypos0, Xpos1, Ypos1);
 
     /* Keep transfer interrupt-driven so upper layer timeout can recover
      * from unexpected LCDC/TE conditions.
      */
 
-    HAL_LCDC_SendLayerData2Reg_IT(hlcdc, ((0x32 << 24) | (REG_WRITE_RAM << 8)), 4);
+    HAL_LCDC_SendLayerData2Reg_IT(hlcdc, ((0x32u << 24) | (REG_WRITE_RAM << 8)), 4);
 
 }
 
@@ -425,20 +505,20 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *hlcdc, const uint8_t *RG
 /**
   * @brief  Writes  to the selected LCD register.
   * @param  LCD_Reg: address of the selected register.
-  * @retval None
+  * @retval HAL_OK on success, or HAL error status on failure.
   */
-static void LCD_WriteReg(LCDC_HandleTypeDef *hlcdc, uint16_t LCD_Reg, uint8_t *Parameters, uint32_t NbParameters)
+static HAL_StatusTypeDef LCD_WriteReg(LCDC_HandleTypeDef *hlcdc, uint16_t LCD_Reg, uint8_t *Parameters, uint32_t NbParameters)
 {
     uint32_t cmd;
     HAL_StatusTypeDef status;
 
     if ((REG_WRITE_RAM == LCD_Reg) || (REG_CONTINUE_WRITE_RAM == LCD_Reg))
     {
-        cmd = (0x32 << 24) | (LCD_Reg << 8);
+        cmd = (0x32u << 24) | (LCD_Reg << 8);
     }
     else
     {
-        cmd = (0x02 << 24) | (LCD_Reg << 8);
+        cmd = (0x02u << 24) | (LCD_Reg << 8);
     }
 
     status = HAL_LCDC_WriteU32Reg(hlcdc, cmd, Parameters, NbParameters);
@@ -449,6 +529,7 @@ static void LCD_WriteReg(LCDC_HandleTypeDef *hlcdc, uint16_t LCD_Reg, uint8_t *P
                 LCD_Reg, (unsigned long)NbParameters, status);
     }
 
+    return status;
 }
 
 
@@ -465,7 +546,7 @@ static uint32_t LCD_ReadData(LCDC_HandleTypeDef *hlcdc, uint16_t RegValue, uint8
 
     LCD_ReadMode(hlcdc, true);
 
-    HAL_LCDC_ReadU32Reg(hlcdc, ((0x03 << 24) | (RegValue << 8)), (uint8_t *)&rd_data, ReadSize);
+    HAL_LCDC_ReadU32Reg(hlcdc, ((0x03u << 24) | (RegValue << 8)), (uint8_t *)&rd_data, ReadSize);
 
 
     LCD_ReadMode(hlcdc, false);
@@ -486,9 +567,9 @@ static uint32_t LCD_ReadPixel(LCDC_HandleTypeDef *hlcdc, uint16_t Xpos, uint16_t
     read_value = LCD_ReadData(hlcdc, REG_READ_RAM, 4);
     DEBUG_PRINTF("result: [%x]\n", read_value);
 
-    b = (read_value >> 0) & 0xFF;
+    r = (read_value >> 0) & 0xFF;
     g = (read_value >> 8) & 0xFF;
-    r = (read_value >> 16) & 0xFF;
+    b = (read_value >> 16) & 0xFF;
 
     DEBUG_PRINTF("r=%d, g=%d, b=%d \n", r, g, b);
 
@@ -539,11 +620,13 @@ static void LCD_SetColorMode(LCDC_HandleTypeDef *hlcdc, uint16_t color_mode)
 
     LCD_WriteReg(hlcdc, REG_COLOR_MODE, parameter, 1);
     HAL_LCDC_SetOutFormat(hlcdc, lcdc_int_cfg.color_mode);
+    HAL_LCDC_LayerSetFormat(hlcdc, HAL_LCDC_LAYER_DEFAULT,
+                            lcdc_int_cfg.color_mode);
 }
 
 static void  LCD_SetBrightness(LCDC_HandleTypeDef *hlcdc, uint8_t br)
 {
-    uint8_t bright = (uint8_t)((int)REG_BRIGHTNESS_MAX * br / 100);
+    uint8_t bright = (uint8_t)(((uint16_t)REG_BRIGHTNESS_MAX * br + 50) / 100);
     LCD_WriteReg(hlcdc, REG_WBRIGHT, &bright, 1);
 }
 

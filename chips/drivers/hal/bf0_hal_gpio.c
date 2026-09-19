@@ -206,6 +206,7 @@ __HAL_ROM_USED void HAL_GPIO_Init(GPIO_TypeDef *hgpio, GPIO_InitTypeDef *GPIO_In
     }
     else
     {
+        DISABLE_ISR(gpiox, (1UL << offset));
         gpiox->DOECR = (1UL << offset); //Disable output
 
         if (GPIO_Init->Mode == GPIO_MODE_IT_RISING)
@@ -304,6 +305,17 @@ __HAL_ROM_USED void HAL_GPIO_DeInit(GPIO_TypeDef *hgpio, uint32_t GPIO_Pin)
     gpiox->DOECR |= (1UL << offset);
     DISABLE_ISR(gpiox, (1UL << offset));
     CLEAR_OPEN_DRAIN_FLAG(gpiox, (1UL << offset));
+
+    /* Clear interrupt type (edge/level) configuration */
+#ifndef SF32LB55X
+    gpiox->ITCR |= (1UL << offset);
+    gpiox->IPHCR = (1UL << offset);
+    gpiox->IPLCR = (1UL << offset);
+#else
+    gpiox->ITCR |= (1UL << offset);
+    gpiox->IPSR &= ~(1UL << offset);
+    gpiox->IPCR &= ~(1UL << offset);
+#endif /* SF32LB55X */
 }
 
 /**

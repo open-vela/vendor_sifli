@@ -74,8 +74,8 @@ static void board_pinmux_psram_func3()
     HAL_PIN_Set(PAD_SA08, MPI1_CS,  PIN_NOPULL, 1);
     HAL_PIN_Set(PAD_SA05, MPI1_DIO0, PIN_PULLDOWN, 1);
     HAL_PIN_Set(PAD_SA07, MPI1_DIO1, PIN_PULLDOWN, 1);
-    HAL_PIN_Set(PAD_SA06, MPI1_DIO2, PIN_PULLUP, 1);
-    HAL_PIN_Set(PAD_SA10, MPI1_DIO3, PIN_PULLUP, 1);
+    HAL_PIN_Set(PAD_SA06, MPI1_DIO2, PIN_PULLDOWN, 1);
+    HAL_PIN_Set(PAD_SA10, MPI1_DIO3, PIN_PULLDOWN, 1);
 
     HAL_PIN_Set_Analog(PAD_SA00, 1);
     HAL_PIN_Set_Analog(PAD_SA01, 1);
@@ -189,22 +189,20 @@ static void BSP_PIN_Common(void)
     // HAL_PIN_Set(PAD_PA30, I2C1_SCL, PIN_PULLUP, 1);
     // HAL_PIN_Set(PAD_PA33, I2C1_SDA, PIN_PULLUP, 1);
 
-//     HAL_PIN_Set_DS0(PAD_PA24, 1, 1);
-//     HAL_PIN_Set_DS0(PAD_PA25, 1, 1);
-//     HAL_PIN_Set_DS0(PAD_PA28, 1, 1);
-//     HAL_PIN_Set_DS0(PAD_PA29, 1, 1);
-//
-//     HAL_PIN_Set_DS1(PAD_PA24, 1, 1);
-//     HAL_PIN_Set_DS1(PAD_PA25, 1, 1);
-//     HAL_PIN_Set_DS1(PAD_PA28, 1, 1);
-//     HAL_PIN_Set_DS1(PAD_PA29, 1, 1);
+    HAL_PIN_Set_DS0(PAD_PA24, 1, 1);
+    HAL_PIN_Set_DS0(PAD_PA25, 1, 1);
+    HAL_PIN_Set_DS0(PAD_PA28, 1, 1);
+    HAL_PIN_Set_DS0(PAD_PA29, 1, 1);
 
-    HAL_PIN_Set(PAD_PA32, GPTIM2_CH1, PIN_PULLUP, 1);   //  LED
+    HAL_PIN_Set_DS1(PAD_PA24, 1, 1);
+    HAL_PIN_Set_DS1(PAD_PA25, 1, 1);
+    HAL_PIN_Set_DS1(PAD_PA28, 1, 1);
+    HAL_PIN_Set_DS1(PAD_PA29, 1, 1);
 
     // GPIOs
     HAL_PIN_Set(PAD_PA21, GPIO_A21, PIN_PULLDOWN, 1);
     HAL_PIN_Set(PAD_PA26, GPIO_A26, PIN_NOPULL, 1);
-    HAL_PIN_Set(PAD_PA32, GPIO_A32, PIN_PULLDOWN, 1);   // RGB LED
+    HAL_PIN_Set(PAD_PA32, GPIO_A32, PIN_PULLDOWN, 1);   // RGB LED (GPIO mode, not PWM)
     HAL_PIN_Set(PAD_PA38, GPIO_A38, PIN_PULLDOWN, 1);
     HAL_PIN_Set(PAD_PA44, GPIO_A44, PIN_PULLDOWN, 1);   // VBUS_DET
 #endif
@@ -235,6 +233,20 @@ void BSP_PIN_LCD(void)
     HAL_PIN_Set(PAD_PA07, LCDC1_SPI_DIO2, PIN_NOPULL, 1);
     HAL_PIN_Set(PAD_PA08, LCDC1_SPI_DIO3, PIN_NOPULL, 1);
 
+    /* Set max drive strength for QSPI LCD pins (48MHz) */
+    HAL_PIN_Set_DS0(PAD_PA03, 1, 1);
+    HAL_PIN_Set_DS0(PAD_PA04, 1, 1);
+    HAL_PIN_Set_DS0(PAD_PA05, 1, 1);
+    HAL_PIN_Set_DS0(PAD_PA06, 1, 1);
+    HAL_PIN_Set_DS0(PAD_PA07, 1, 1);
+    HAL_PIN_Set_DS0(PAD_PA08, 1, 1);
+    HAL_PIN_Set_DS1(PAD_PA03, 1, 1);
+    HAL_PIN_Set_DS1(PAD_PA04, 1, 1);
+    HAL_PIN_Set_DS1(PAD_PA05, 1, 1);
+    HAL_PIN_Set_DS1(PAD_PA06, 1, 1);
+    HAL_PIN_Set_DS1(PAD_PA07, 1, 1);
+    HAL_PIN_Set_DS1(PAD_PA08, 1, 1);
+
     // LCD reset/power GPIOs used by BSP_LCD_Reset/PowerUp.
     HAL_PIN_Set(PAD_PA00, GPIO_A0, PIN_PULLUP, 1);
     HAL_PIN_Set(PAD_PA10, GPIO_A10, PIN_NOPULL, 1);
@@ -243,9 +255,6 @@ void BSP_PIN_LCD(void)
     HAL_PIN_Set(PAD_PA37, GPIO_A37, PIN_NOPULL, 1);
 #endif
 
-#ifdef BSP_USING_TOUCHD
-    BSP_PIN_Touch();
-#endif
 #elif defined(BSP_LCDC_USING_DBI)
     HAL_PIN_Set(PAD_PA01, GPTIM1_CH4, PIN_NOPULL, 1);   // LCD backlight PWM
 
@@ -281,5 +290,8 @@ void BSP_PIN_Init(void)
 
     BSP_PIN_LCD();
 
+#ifdef BSP_USING_TOUCHD
+    BSP_PIN_Touch();
+#endif
 }
 

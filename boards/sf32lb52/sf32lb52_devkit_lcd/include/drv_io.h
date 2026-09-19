@@ -63,18 +63,20 @@ void BSP_PowerDownCustom(int coreid, bool is_deep_sleep);
 void BSP_PowerUpCustom(bool is_deep_sleep);
 
 /**
- * @brief LCD power up/down/reset
+ * @brief LCD power up/down/reset/state query
  */
 void BSP_LCD_Reset(uint8_t high1_low0);
 void BSP_LCD_PowerUp(void);
 void BSP_LCD_PowerDown(void);
+bool BSP_LCD_IsPowered(void);
 
 /**
- * @brief Touch power up/down/reset
+ * @brief Touch power up/down/reset/state query
  */
 void BSP_TP_Reset(uint8_t high1_low0);
 void BSP_TP_PowerUp(void);
 void BSP_TP_PowerDown(void);
+bool BSP_TP_IsPowered(void);
 
 /**
  * @brief Flash

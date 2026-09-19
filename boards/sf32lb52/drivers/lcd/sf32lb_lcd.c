@@ -32,9 +32,12 @@
 #include <assert.h>
 #include <errno.h>
 #include <debug.h>
+#include <pthread.h>
+#include <semaphore.h>
 
 #include <nuttx/arch.h>
 #include <nuttx/board.h>
+#include <nuttx/spinlock.h>
 #include <nuttx/kmalloc.h>
 #include <nuttx/spi/spi.h>
 #include <nuttx/lcd/lcd.h>
@@ -81,11 +84,15 @@ struct sf32lb_lcd_dev_s
     uint16_t buf_format;
     HAL_LCDC_LayerDef select_layer;
 
-    FAR sem_t init_sem;
-    FAR sem_t draw_sem;
+    pthread_mutex_t init_lock;
+    pthread_cond_t  init_cond;
+    sem_t draw_sem;
+    volatile bool   init_done;
 
     int power;
     uint8_t bpp;
+
+    pthread_mutex_t conv_lock;  /* Protects s_conv_buf for 8-bit conversion */
 };
 
 /* Configuration ************************************************************/
@@ -94,8 +101,19 @@ struct sf32lb_lcd_dev_s
  * Private Data
  ****************************************************************************/
 static struct sf32lb_lcd_dev_s s_drv_lcd;
-static volatile bool s_fb_registering;
-static volatile bool s_lcd_hw_ready;
+/* Shared with the board power sequencer. */
+volatile bool s_lcd_hw_ready;
+static volatile bool s_lcd_power_cycled;  /* Set by BSP_LCD_PowerDown to trigger full re-init */
+
+/* Static conversion buffer for 8-bit -> 16-bit pixel format conversion.
+ * Sized for maximum supported display width; avoids per-call heap allocation.
+ * LCD_CONV_CHUNK_ROWS controls how many rows are batched per DMA transfer
+ * in the 8-bit putarea path to reduce DMA transaction overhead.
+ */
+#define LCD_CONV_MAX_WIDTH   480
+#define LCD_CONV_CHUNK_ROWS  8
+static uint16_t s_conv_buf[LCD_CONV_MAX_WIDTH * LCD_CONV_CHUNK_ROWS]
+    __attribute__((aligned(sizeof(uintptr_t))));
 
 static void sf32lb_lcd_ensure_display_on(FAR struct sf32lb_lcd_dev_s *dev)
 {
@@ -104,9 +122,25 @@ static void sf32lb_lcd_ensure_display_on(FAR struct sf32lb_lcd_dev_s *dev)
       return;
     }
 
+  pthread_mutex_lock(&dev->init_lock);
+
+  /* After a power cycle (deep sleep resume), the CO5300 loses all register
+   * state.  We must re-run the full Init sequence, not just DisplayOn.
+   */
+  if (s_lcd_power_cycled)
+    {
+      if (dev->p_drv_ops->p_ops->Init != NULL)
+        {
+          dev->p_drv_ops->p_ops->Init(&dev->hlcdc);
+        }
+      s_lcd_power_cycled = false;
+      dev->power = CONFIG_LCD_MAXPOWER;
+      goto out;
+    }
+
   if (dev->power > 0)
     {
-      return;
+      goto out;
     }
 
   if (dev->p_drv_ops->p_ops->DisplayOn != NULL)
@@ -114,6 +148,9 @@ static void sf32lb_lcd_ensure_display_on(FAR struct sf32lb_lcd_dev_s *dev)
       dev->p_drv_ops->p_ops->DisplayOn(&dev->hlcdc);
       dev->power = CONFIG_LCD_MAXPOWER;
     }
+
+out:
+  pthread_mutex_unlock(&dev->init_lock);
 }
 
 /****************************************************************************
@@ -235,6 +272,18 @@ static void SendLayerDataCpltCbk(LCDC_HandleTypeDef *lcdc)
 static void SendLayerDataErrCbk(LCDC_HandleTypeDef *lcdc)
 {
     lcdinfo("SendLayerDataErrCbk \r\n");
+    /* Clear both callbacks to prevent double semaphore post.
+     * The HAL overflow handler (ICB_OF) clears g_LCDC_CpltCallback;
+     * we mirror that pattern here for XferCpltCallback.
+     */
+    lcdc->XferCpltCallback = NULL;
+    if (lcdc->XferErrorCallback != NULL)
+    {
+        lcdc->XferErrorCallback = NULL;
+        struct sf32lb_lcd_dev_s *p_drvlcd =
+            container_of(lcdc, struct sf32lb_lcd_dev_s, hlcdc);
+        sem_post(&p_drvlcd->draw_sem);
+    }
 }
 
 
@@ -264,26 +313,41 @@ static void sf32lb_lcd_wrram(FAR struct sf32lb_lcd_dev_s *dev, FAR const uint8_t
        DEBUGASSERT((new_x1 - new_x0 + 1) <= dev->p_drv_ops->lcd_horizonal_res);
        DEBUGASSERT((new_y1 - new_y0 + 1) <= dev->p_drv_ops->lcd_vertical_res);
 
-        /* Ensure DMA reads the latest pixel data from memory. */
+        /* Ensure DMA reads the latest pixel data from memory.
+         * The DMA engine always transfers in the LCD panel's native pixel
+         * format (RGB565 = 2 bytes/pixel).  When the source is 8-bit the
+         * caller converts to 16-bit before calling wrram, so the minimum
+         * clean size is pixels * sizeof(uint16_t) regardless of dev->bpp.
+         */
 
         pixels = (size_t)(new_x1 - new_x0 + 1) * (size_t)(new_y1 - new_y0 + 1);
         xfer_bytes = pixels * ((size_t)dev->bpp >> 3);
+        if (xfer_bytes < pixels * sizeof(uint16_t))
+          {
+            xfer_bytes = pixels * sizeof(uint16_t);
+          }
+
         if (buffer != NULL && xfer_bytes > 0)
         {
           up_clean_dcache((uintptr_t)buffer, (uintptr_t)buffer + xfer_bytes);
         }
        
-        /* Drain stale completion tokens before starting a new transfer. */
-        while (sem_trywait(&(dev->draw_sem)) == 0)
+        /* The caller holds conv_lock until DMA completion below. */
+
+        /* Protect callback publication, but keep interrupts enabled during
+         * HAL register transfers: those can wait for LCDC/TE and need timer
+         * interrupts to enforce their deadlines. conv_lock serializes writers.
+         */
         {
+          irqstate_t flags = enter_critical_section();
+          while (sem_trywait(&(dev->draw_sem)) == 0) {}
+          dev->hlcdc.XferCpltCallback = SendLayerDataCpltCbk;
+          dev->hlcdc.XferErrorCallback = SendLayerDataErrCbk;
+          __sync_fetch_and_add(&dev->hlcdc.debug_cnt0, 1);
+          leave_critical_section(flags);
         }
-
-        dev->hlcdc.XferCpltCallback = SendLayerDataCpltCbk;
-        dev->hlcdc.XferErrorCallback = SendLayerDataErrCbk;
-        dev->hlcdc.debug_cnt0++;
-
-
-        dev->p_drv_ops->p_ops->WriteMultiplePixels(&dev->hlcdc, buffer, new_x0, new_y0, new_x1, new_y1);
+        dev->p_drv_ops->p_ops->WriteMultiplePixels(&dev->hlcdc, buffer,
+          new_x0, new_y0, new_x1, new_y1);
         //enable_low_power(&drv_lcd);
         /* --------- Wait send complete (bounded wait) -----------------*/
         {
@@ -298,7 +362,15 @@ static void sf32lb_lcd_wrram(FAR struct sf32lb_lcd_dev_s *dev, FAR const uint8_t
 
           if (sem_timedwait(&(dev->draw_sem), &ts) < 0)
           {
-            lcdwarn("lcd xfer wait timeout: %d", errno);
+            lcdwarn("lcd xfer wait timeout: %d\n", errno);
+            /* Force LCDC out of BUSY state so next transfer can proceed */
+            dev->hlcdc.State = HAL_LCDC_STATE_READY;
+            dev->hlcdc.Lock  = HAL_UNLOCKED;
+            /* Clear callbacks to suppress stale ISR posts */
+            dev->hlcdc.XferCpltCallback = NULL;
+            dev->hlcdc.XferErrorCallback = NULL;
+            /* Drain stale tokens */
+            while (sem_trywait(&(dev->draw_sem)) == 0) {}
           }
         }
 
@@ -329,25 +401,29 @@ static int sf32lb_lcd_putrun(FAR struct lcd_dev_s *dev,
 {
   FAR struct sf32lb_lcd_dev_s *priv = (FAR struct sf32lb_lcd_dev_s *)dev;
 
-  if (s_fb_registering || !s_lcd_hw_ready)
+  if (!s_lcd_hw_ready)
     {
       return OK;
     }
 
   lcd_debug_print("row: %d col: %d npixels: %d\n", row, col, npixels);
-  DEBUGASSERT(buffer && ((uintptr_t)buffer & 1) == 0);
+  if (buffer == NULL)
+    {
+      return -EINVAL;
+    }
 
   if (priv->bpp == 8)
     {
-      FAR uint16_t *conv;
       size_t i;
 
-      conv = kmm_malloc(npixels * sizeof(uint16_t));
-      if (conv == NULL)
+      if (npixels > LCD_CONV_MAX_WIDTH)
         {
-          return -ENOMEM;
+          lcderr("putrun: npixels %zu exceeds LCD_CONV_MAX_WIDTH %d\n",
+                 npixels, LCD_CONV_MAX_WIDTH);
+          return -EINVAL;
         }
 
+      pthread_mutex_lock(&priv->conv_lock);
       for (i = 0; i < npixels; i++)
         {
           uint8_t v = buffer[i];
@@ -355,22 +431,24 @@ static int sf32lb_lcd_putrun(FAR struct lcd_dev_s *dev,
           uint8_t g = (v >> 2) & 0x07;
           uint8_t b = v & 0x03;
 
-          conv[i] = (uint16_t)((((uint16_t)r * 31 / 7) << 11) |
-                               (((uint16_t)g * 63 / 7) << 5) |
-                               (((uint16_t)b * 31 / 3) << 0));
+          s_conv_buf[i] = (uint16_t)((((uint16_t)r * 31 / 7) << 11) |
+                                     (((uint16_t)g * 63 / 7) << 5) |
+                                     (((uint16_t)b * 31 / 3) << 0));
         }
 
-      sf32lb_lcd_setarea(priv, col, row, col + npixels - 1, row);
-      sf32lb_lcd_wrram(priv, (FAR const uint8_t *)conv,
-                       col, row, col + npixels - 1, row);
       sf32lb_lcd_ensure_display_on(priv);
-      kmm_free(conv);
+      sf32lb_lcd_setarea(priv, col, row, col + npixels - 1, row);
+      sf32lb_lcd_wrram(priv, (FAR const uint8_t *)s_conv_buf,
+                       col, row, col + npixels - 1, row);
+      pthread_mutex_unlock(&priv->conv_lock);
       return OK;
     }
 
+  sf32lb_lcd_ensure_display_on(priv);
+  pthread_mutex_lock(&priv->conv_lock);
   sf32lb_lcd_setarea(priv, col, row, col + npixels - 1, row);
   sf32lb_lcd_wrram(priv, buffer, col, row, col + npixels - 1, row);
-  sf32lb_lcd_ensure_display_on(priv);
+  pthread_mutex_unlock(&priv->conv_lock);
 
   return OK;
 }
@@ -404,9 +482,15 @@ static int sf32lb_lcd_putarea(FAR struct lcd_dev_s *dev,
   size_t bytes_per_pixel;
   size_t row_bytes;
 
-  if (s_fb_registering || !s_lcd_hw_ready)
+  if (!s_lcd_hw_ready)
     {
       return OK;
+    }
+
+  /* Validate coordinates to prevent unsigned underflow / buffer overrun */
+  if (row_start > row_end || col_start > col_end)
+    {
+      return -EINVAL;
     }
 
   bytes_per_pixel = priv->bpp >> 3;
@@ -415,51 +499,82 @@ static int sf32lb_lcd_putarea(FAR struct lcd_dev_s *dev,
   lcd_debug_print("row_start: %d row_end: %d col_start: %d col_end: %d\n",
          row_start, row_end, col_start, col_end);
 
-  DEBUGASSERT(buffer && ((uintptr_t)buffer & 1) == 0);
+  if (buffer == NULL)
+    {
+      return -EINVAL;
+    }
 
   if (priv->bpp == 8)
     {
-      fb_coord_t y;
       fb_coord_t width = col_end - col_start + 1;
-      FAR uint16_t *conv = kmm_malloc(width * sizeof(uint16_t));
 
-      if (conv == NULL)
+      if (width > LCD_CONV_MAX_WIDTH)
         {
-          return -ENOMEM;
+          lcderr("putarea: width %d exceeds LCD_CONV_MAX_WIDTH %d\n",
+                 width, LCD_CONV_MAX_WIDTH);
+          return -EINVAL;
         }
 
-      for (y = row_start; y <= row_end; y++)
-        {
-          FAR const uint8_t *src = buffer + (y - row_start) * stride;
-          fb_coord_t x;
-
-          for (x = 0; x < width; x++)
-            {
-              uint8_t v = src[x];
-              uint8_t r = (v >> 5) & 0x07;
-              uint8_t g = (v >> 2) & 0x07;
-              uint8_t b = v & 0x03;
-
-              conv[x] = (uint16_t)((((uint16_t)r * 31 / 7) << 11) |
-                                   (((uint16_t)g * 63 / 7) << 5) |
-                                   (((uint16_t)b * 31 / 3) << 0));
-            }
-
-          sf32lb_lcd_setarea(priv, col_start, y, col_end, y);
-          sf32lb_lcd_wrram(priv, (FAR const uint8_t *)conv,
-                           col_start, y, col_end, y);
-        }
+      /* Batch LCD_CONV_CHUNK_ROWS rows per DMA to reduce transfer overhead.
+       * Source rows are converted into s_conv_buf with tight packing so the
+       * DMA engine sees a contiguous block.
+       */
 
       sf32lb_lcd_ensure_display_on(priv);
-      kmm_free(conv);
+      pthread_mutex_lock(&priv->conv_lock);
+      {
+        fb_coord_t y = row_start;
+
+        while (y <= row_end)
+          {
+            fb_coord_t chunk_end = y + LCD_CONV_CHUNK_ROWS - 1;
+            fb_coord_t row;
+            size_t offset = 0;
+
+            if (chunk_end > row_end)
+              {
+                chunk_end = row_end;
+              }
+
+            for (row = y; row <= chunk_end; row++)
+              {
+                FAR const uint8_t *src = buffer + (row - row_start) * stride;
+                fb_coord_t x;
+
+                for (x = 0; x < width; x++)
+                  {
+                    uint8_t v = src[x];
+                    uint8_t r = (v >> 5) & 0x07;
+                    uint8_t g = (v >> 2) & 0x07;
+                    uint8_t b = v & 0x03;
+
+                    s_conv_buf[offset + x] = (uint16_t)(
+                      (((uint16_t)r * 31 / 7) << 11) |
+                      (((uint16_t)g * 63 / 7) << 5) |
+                      (((uint16_t)b * 31 / 3) << 0));
+                  }
+
+                offset += width;
+              }
+
+            sf32lb_lcd_setarea(priv, col_start, y, col_end, chunk_end);
+            sf32lb_lcd_wrram(priv, (FAR const uint8_t *)s_conv_buf,
+                             col_start, y, col_end, chunk_end);
+            y = chunk_end + 1;
+          }
+      }
+      pthread_mutex_unlock(&priv->conv_lock);
       return OK;
     }
+
+  sf32lb_lcd_ensure_display_on(priv);
 
   if ((size_t)stride == row_bytes)
     {
       fb_coord_t y = row_start;
       const fb_coord_t chunk_rows = 24;
 
+      pthread_mutex_lock(&priv->conv_lock);
       while (y <= row_end)
         {
           fb_coord_t y1 = y + chunk_rows - 1;
@@ -475,6 +590,7 @@ static int sf32lb_lcd_putarea(FAR struct lcd_dev_s *dev,
           sf32lb_lcd_wrram(priv, src, col_start, y, col_end, y1);
           y = y1 + 1;
         }
+      pthread_mutex_unlock(&priv->conv_lock);
     }
   else
     {
@@ -484,6 +600,7 @@ static int sf32lb_lcd_putarea(FAR struct lcd_dev_s *dev,
        * one row at a time using stride to step through the source buffer.
        */
 
+      pthread_mutex_lock(&priv->conv_lock);
       for (y = row_start; y <= row_end; y++)
         {
           FAR const uint8_t *src = buffer + (y - row_start) * stride;
@@ -491,9 +608,8 @@ static int sf32lb_lcd_putarea(FAR struct lcd_dev_s *dev,
           sf32lb_lcd_setarea(priv, col_start, y, col_end, y);
           sf32lb_lcd_wrram(priv, src, col_start, y, col_end, y);
         }
+      pthread_mutex_unlock(&priv->conv_lock);
     }
-
-  sf32lb_lcd_ensure_display_on(priv);
 
   return OK;
 }
@@ -522,12 +638,13 @@ static int sf32lb_lcd_getrun(FAR struct lcd_dev_s *dev,
   //FAR uint16_t *dest = (FAR uint16_t *)buffer;
 
   lcdinfo("row: %d col: %d npixels: %d\n", row, col, npixels);
-  DEBUGASSERT(buffer && ((uintptr_t)buffer & 1) == 0);
+  UNUSED(buffer);
+  UNUSED(npixels);
 
-  sf32lb_lcd_setarea(priv, col, row, col + npixels - 1, row);
-  //sf32lb_lcd_rdram(priv, dest, npixels);
-  DEBUGASSERT(0);
-  return OK;
+  /* Write-only display — no readback possible */
+  /* CO5300 is write-only SPI LCD, readback not supported */
+  lcdinfo("getrun not supported on write-only LCD\n");
+  return -ENOSYS;
 }
 #endif
 
@@ -546,11 +663,19 @@ static int sf32lb_lcd_getvideoinfo(FAR struct lcd_dev_s *dev,
 
   /* Wait for async lcd_init task to finish before accessing driver state */
 
-  if(!s_drv_lcd.p_drv_ops)
-  {
-  	sem_wait(&(s_drv_lcd.init_sem));
-	sem_post(&s_drv_lcd.init_sem);
-  }
+  pthread_mutex_lock(&s_drv_lcd.init_lock);
+  while (!s_drv_lcd.init_done)
+    {
+      pthread_cond_wait(&s_drv_lcd.init_cond, &s_drv_lcd.init_lock);
+    }
+  /* Read p_drv_ops while still holding the lock to avoid race with uninitialize */
+  FAR lcd_drv_desc_t *ops = s_drv_lcd.p_drv_ops;
+  pthread_mutex_unlock(&s_drv_lcd.init_lock);
+
+  if (ops == NULL)
+    {
+      return -ENODEV;
+    }
 
  switch(s_drv_lcd.bpp)
  {
@@ -571,8 +696,8 @@ static int sf32lb_lcd_getvideoinfo(FAR struct lcd_dev_s *dev,
         break;
   }
 
-  vinfo->xres    = s_drv_lcd.p_drv_ops->lcd_horizonal_res;        /* Horizontal resolution in pixel columns */
-  vinfo->yres    = s_drv_lcd.p_drv_ops->lcd_vertical_res;        /* Vertical resolution in pixel rows */
+  vinfo->xres    = ops->lcd_horizonal_res;        /* Horizontal resolution in pixel columns */
+  vinfo->yres    = ops->lcd_vertical_res;        /* Vertical resolution in pixel rows */
   vinfo->nplanes = 1;                  /* Number of color planes supported */
 
   
@@ -595,11 +720,12 @@ static int sf32lb_lcd_getplaneinfo(FAR struct lcd_dev_s *dev,
 {
   FAR struct sf32lb_lcd_dev_s *priv = (FAR struct sf32lb_lcd_dev_s *)dev;
 
-  if(!s_drv_lcd.p_drv_ops)
-  {
-  	sem_wait(&(s_drv_lcd.init_sem));
-	sem_post(&s_drv_lcd.init_sem);
-  }
+  pthread_mutex_lock(&s_drv_lcd.init_lock);
+  while (!s_drv_lcd.init_done)
+    {
+      pthread_cond_wait(&s_drv_lcd.init_cond, &s_drv_lcd.init_lock);
+    }
+  pthread_mutex_unlock(&s_drv_lcd.init_lock);
 
   DEBUGASSERT(dev && pinfo && planeno == 0);
   lcdinfo("planeno: %d bpp: %d\n", planeno, priv->bpp);
@@ -638,14 +764,28 @@ static int sf32lb_lcd_setpower(FAR struct lcd_dev_s *dev, int power)
   lcdinfo("power: %d\n", power);
   DEBUGASSERT((unsigned)power <= CONFIG_LCD_MAXPOWER);
 
+  pthread_mutex_lock(&priv->init_lock);
+
   /* Set new power level */
 
   if (power > 0)
     {
-      /* Turn on the display */
+      /* After a power cycle the panel registers are wiped —
+       * run the full init sequence instead of just DisplayOn.
+       */
 
-      if (priv->p_drv_ops && priv->p_drv_ops->p_ops &&
-          priv->p_drv_ops->p_ops->DisplayOn)
+      if (s_lcd_power_cycled)
+        {
+          if (priv->p_drv_ops && priv->p_drv_ops->p_ops &&
+              priv->p_drv_ops->p_ops->Init)
+            {
+              priv->p_drv_ops->p_ops->Init(&priv->hlcdc);
+            }
+
+          s_lcd_power_cycled = false;
+        }
+      else if (priv->p_drv_ops && priv->p_drv_ops->p_ops &&
+               priv->p_drv_ops->p_ops->DisplayOn)
         {
           priv->p_drv_ops->p_ops->DisplayOn(&priv->hlcdc);
         }
@@ -669,6 +809,7 @@ static int sf32lb_lcd_setpower(FAR struct lcd_dev_s *dev, int power)
       priv->power = 0;
     }
 
+  pthread_mutex_unlock(&priv->init_lock);
   return OK;
 }
 
@@ -698,6 +839,34 @@ static int sf32lb_lcd_setcontrast(FAR struct lcd_dev_s *dev,
                               unsigned int contrast)
 {
   lcdinfo("contrast: %d\n", contrast);
+  return -ENOSYS;
+}
+
+/****************************************************************************
+ * Name:  sf32lb_lcd_setframerate
+ *
+ * Description:
+ *   Set LCD panel frame rate.  Not supported on this panel.
+ *
+ ****************************************************************************/
+
+static int sf32lb_lcd_setframerate(FAR struct lcd_dev_s *dev, int rate)
+{
+  lcdinfo("Not implemented\n");
+  return -ENOSYS;
+}
+
+/****************************************************************************
+ * Name:  sf32lb_lcd_getframerate
+ *
+ * Description:
+ *   Get LCD panel frame rate.  Not supported on this panel.
+ *
+ ****************************************************************************/
+
+static int sf32lb_lcd_getframerate(FAR struct lcd_dev_s *dev)
+{
+  lcdinfo("Not implemented\n");
   return -ENOSYS;
 }
 
@@ -731,13 +900,42 @@ static int lcd_hw_setup_thread_entry(int argc, FAR char *argv[])
   int ret;
   int retry;
 
+    /* Configure LCDC layer format BEFORE fb_register so that
+     * the initial framebuffer content (zeroed by kmm_zalloc) can
+     * be written to the panel.  Without this, the display shows
+     * garbage until the first application write.
+     */
+
+#ifdef SOC_BF0_HCPU     /* gpio1 only work on hcpu */
+    irq_attach(NX_IRQ(LCDC1_IRQn), lcdc1_isr, (void *)&s_drv_lcd.hlcdc);
+    up_enable_irq(NX_IRQ(LCDC1_IRQn));
+#endif /* SOC_BF0_HCPU */
+
+    HAL_LCDC_SetBgColor(&s_drv_lcd.hlcdc, 0, 0, 0);
+    HAL_LCDC_LayerReset(&s_drv_lcd.hlcdc, HAL_LCDC_LAYER_DEFAULT);
+
+    /* Use panel's color mode instead of hardcoded RGB565 */
+    if (p_drv_ops && p_drv_ops->p_init_cfg)
+    {
+        HAL_LCDC_LayerSetFormat(&s_drv_lcd.hlcdc, HAL_LCDC_LAYER_DEFAULT,
+                                p_drv_ops->p_init_cfg->color_mode);
+    }
+    else
+    {
+        /* Fallback to RGB565 if config not available */
+        HAL_LCDC_LayerSetFormat(&s_drv_lcd.hlcdc, HAL_LCDC_LAYER_DEFAULT,
+                                LCDC_PIXEL_FORMAT_RGB565);
+    }
+
+    s_lcd_hw_ready = true;
+
 #if defined(CONFIG_VIDEO_FB) && defined(CONFIG_LCD_FRAMEBUFFER)
-    /* Register /dev/fb0 first so node creation is not blocked by panel init. */
+    /* Now register /dev/fb0 — the initial zero-fill write will go through
+     * because s_lcd_hw_ready is already true.
+     */
     for (retry = 0; retry < 30; retry++)
       {
-        s_fb_registering = true;
         ret = fb_register(0, 0);
-        s_fb_registering = false;
 
         if (ret == OK || ret == -EEXIST)
           {
@@ -753,39 +951,28 @@ static int lcd_hw_setup_thread_entry(int argc, FAR char *argv[])
 
         usleep(100 * 1000);
       }
+
+    if (retry >= 30)
+      {
+        syslog(LOG_ERR, "ERROR: fb_register() exhausted %d retries, last error: %d\n",
+               retry, ret);
+      }
 #endif
-
-    if (p_drv_ops && p_drv_ops->p_ops && p_drv_ops->p_ops->Init)
-    {
-        p_drv_ops->p_ops->Init(&s_drv_lcd.hlcdc);
-    }
-
-#ifdef SOC_BF0_HCPU     /* gpio1 only work on hcpu */
-    irq_attach(NX_IRQ(LCDC1_IRQn), lcdc1_isr, (void *)&s_drv_lcd.hlcdc);
-    up_enable_irq(NX_IRQ(LCDC1_IRQn));
-#endif /* SOC_BF0_HCPU */
-
-    HAL_LCDC_SetBgColor(&s_drv_lcd.hlcdc, 0, 0, 0);
-    HAL_LCDC_LayerReset(&s_drv_lcd.hlcdc, HAL_LCDC_LAYER_DEFAULT);
-    HAL_LCDC_LayerSetFormat(&s_drv_lcd.hlcdc, HAL_LCDC_LAYER_DEFAULT,
-                            LCDC_PIXEL_FORMAT_RGB565);
-
-    s_lcd_hw_ready = true;
 
     return OK;
 }
 
 static int lcd_init_thread_entry(int argc, FAR char *argv[])
 {
-	lcd_drv_desc_t *p_drv_ops;
+  lcd_drv_desc_t *p_drv_ops;
   int ret;
   int hw_pid;
   bool lcd_registered = false;
   int retry;
 
-	BSP_LCD_PowerUp();
-	
-	p_drv_ops = find_right_driver();
+  BSP_LCD_PowerUp();
+
+  p_drv_ops = find_right_driver();
 
 #ifdef CONFIG_LCD_USING_CO5300
   if (!p_drv_ops)
@@ -801,99 +988,113 @@ static int lcd_init_thread_entry(int argc, FAR char *argv[])
   }
 #endif
 
-	if (p_drv_ops)
-	{
+  if (p_drv_ops)
+  {
     lcdinfo("Init LCD %s", p_drv_ops->name);
 
-		switch(p_drv_ops->p_init_cfg->color_mode)
-		{
-		   case LCDC_PIXEL_FORMAT_RGB565:
-			 s_drv_lcd.bpp = 16;
-			 break;
-		
-		   case LCDC_PIXEL_FORMAT_RGB888:
-			 s_drv_lcd.bpp = 24;
-			 break;
-			 
-         default:
-       s_drv_lcd.bpp = 16;
-       lcdwarn("Unknown color mode %d, fallback to RGB565",
-               p_drv_ops->p_init_cfg->color_mode);
-       break;
-		 }
+    /* CRITICAL: When CONFIG_LCD_USING_CO5300 (or similar) is defined,
+     * find_right_driver() returns the driver directly WITHOUT calling Init().
+     * We MUST call Init() here to program the panel registers.
+     * Without this, the LCD panel is never configured and won't display anything.
+     */
 
-  /* Keep framebuffer format aligned with panel color mode (typically RGB565)
-   * so fb writes are sent without intermediate color conversion.
+    if (p_drv_ops->p_ops && p_drv_ops->p_ops->Init)
+    {
+      lcdinfo("Calling Init() for %s\n", p_drv_ops->name);
+      p_drv_ops->p_ops->Init(&s_drv_lcd.hlcdc);
+    }
+  }
+
+  /* Publish p_drv_ops and signal all waiters via condvar.
+   * bpp must be set under init_lock so that getvideoinfo() sees a
+   * consistent value when it wakes from the condvar.
    */
 
-	}
-
-	/* If find_right_driver fell back without running Init() (panel ReadID
-	 * mismatch is normal for some QSPI panels), make sure the panel is
-	 * actually programmed BEFORE lcddev_register / fb_register triggers
-	 * setpower() -> DisplayOn (REG 0x29). Otherwise the very first WriteReg
-	 * runs against an uninitialised LCDC controller and returns HAL_BUSY.
-	 */
-	if (p_drv_ops && p_drv_ops->p_ops && p_drv_ops->p_ops->Init)
-	{
-		p_drv_ops->p_ops->Init(&s_drv_lcd.hlcdc);
-	}
-
-	s_drv_lcd.p_drv_ops = p_drv_ops; 
-	sem_post(&s_drv_lcd.init_sem);
-
-	if (!p_drv_ops)
-	{
-		syslog(LOG_ERR, "ERROR: No LCD driver found, skip device register\n");
-		return -ENODEV;
-	}
-
-
-#ifdef CONFIG_LCD_DEV
-    lcd_registered = false;
-#endif
-    /* Retry registration to tolerate early-boot timing races. */
-    for (retry = 0; retry < 30; retry++)
+  pthread_mutex_lock(&s_drv_lcd.init_lock);
+  if (p_drv_ops && p_drv_ops->p_init_cfg)
     {
-#ifdef CONFIG_LCD_DEV
-      if (!lcd_registered)
-      {
-        ret = lcddev_register(0);
-        if (ret == OK || ret == -EEXIST)
+      switch (p_drv_ops->p_init_cfg->color_mode)
         {
-          lcd_registered = true;
-          lcdinfo("lcddev_register done.");
+          case LCDC_PIXEL_FORMAT_RGB565:
+            s_drv_lcd.bpp = 16;
+            break;
+          case LCDC_PIXEL_FORMAT_RGB888:
+            s_drv_lcd.bpp = 24;
+            break;
+          case LCDC_PIXEL_FORMAT_RGB332:
+            s_drv_lcd.bpp = 8;
+            break;
+          default:
+            s_drv_lcd.bpp = 16;
+            break;
         }
-        else if (ret != -ENOENT && ret != -ENODEV)
-        {
-          syslog(LOG_ERR, "ERROR: lcddev_register() failed: %d\n", ret);
-          lcd_registered = true; /* stop retrying on hard errors */
-        }
-      }
-#endif
-
-#ifdef CONFIG_LCD_DEV
-      if (lcd_registered)
-      {
-        break;
-      }
-#endif
-
-      usleep(100 * 1000);
     }
 
-    hw_pid = task_create("lcd_hw",
-                         SCHED_PRIORITY_DEFAULT,
-                         8192,
-                         lcd_hw_setup_thread_entry,
-                         NULL);
+  s_drv_lcd.p_drv_ops = p_drv_ops;
+  s_drv_lcd.init_done = true;
+  pthread_cond_broadcast(&s_drv_lcd.init_cond);
+  pthread_mutex_unlock(&s_drv_lcd.init_lock);
 
-    if (hw_pid < 0)
+  if (!p_drv_ops)
+  {
+    syslog(LOG_ERR, "ERROR: No LCD driver found, skip device register\n");
+    return -ENODEV;
+  }
+
+#ifdef CONFIG_LCD_DEV
+  lcd_registered = false;
+#endif
+
+  /* Retry registration to tolerate early-boot timing races. */
+
+  for (retry = 0; retry < 30; retry++)
+  {
+#ifdef CONFIG_LCD_DEV
+    if (!lcd_registered)
     {
-      syslog(LOG_ERR, "ERROR: lcd_hw task_create failed: %d\n", errno);
+      ret = lcddev_register(0);
+      if (ret == OK || ret == -EEXIST)
+      {
+        lcd_registered = true;
+        lcdinfo("lcddev_register done.");
+      }
+      else if (ret != -ENOENT && ret != -ENODEV)
+      {
+        syslog(LOG_ERR, "ERROR: lcddev_register() failed: %d\n", ret);
+        lcd_registered = true; /* stop retrying on hard errors */
+      }
     }
+#endif
 
-	return 0;
+#ifdef CONFIG_LCD_DEV
+    if (lcd_registered)
+    {
+      break;
+    }
+#endif
+
+    usleep(100 * 1000);
+  }
+
+  hw_pid = task_create("lcd_hw",
+                       SCHED_PRIORITY_DEFAULT,
+                       8192,
+                       lcd_hw_setup_thread_entry,
+                       NULL);
+
+  if (hw_pid < 0)
+  {
+    syslog(LOG_ERR, "ERROR: lcd_hw task_create failed: %d\n", errno);
+
+    /* Mark HW ready anyway so putrun/putarea do not hang forever.
+     * Display writes will go through the LCDC layer path but the
+     * IRQ and background colour will not be configured.
+     */
+
+    s_lcd_hw_ready = true;
+  }
+
+  return OK;
 }
 /****************************************************************************
  * Public Functions
@@ -919,16 +1120,20 @@ int board_lcd_initialize(void)
     initialized = true;
 
     lcdinfo("board_lcd_initialize\n");
+    syslog(LOG_INFO, "LCD: board_lcd_initialize called\n");
     
     memset(&s_drv_lcd, 0, sizeof(s_drv_lcd));
+    s_lcd_power_cycled = false;
 
     s_drv_lcd.hlcdc.Instance = LCDC1;
 
     s_drv_lcd.select_layer = HAL_LCDC_LAYER_DEFAULT;
     s_lcd_hw_ready = false;
 
-    sem_init(&(s_drv_lcd.init_sem), 0, 0);
+    pthread_mutex_init(&s_drv_lcd.init_lock, NULL);
+    pthread_cond_init(&s_drv_lcd.init_cond, NULL);
     sem_init(&(s_drv_lcd.draw_sem), 0, 0);
+    pthread_mutex_init(&s_drv_lcd.conv_lock, NULL);
 
     /* Keep bringup non-blocking; init/register devices in a worker task. */
 
@@ -970,6 +1175,8 @@ struct lcd_dev_s *board_lcd_getdev(int devno)
     g_lcd->setpower     = sf32lb_lcd_setpower;
     g_lcd->getcontrast  = sf32lb_lcd_getcontrast;
     g_lcd->setcontrast  = sf32lb_lcd_setcontrast;
+    g_lcd->setframerate = sf32lb_lcd_setframerate;
+    g_lcd->getframerate = sf32lb_lcd_getframerate;
     g_lcd->getareaalign = sf32lb_lcd_getalignment;
   #if 0
   g_lcd = st7789_lcdinitialize(g_spidev);
@@ -999,8 +1206,54 @@ struct lcd_dev_s *board_lcd_getdev(int devno)
 void board_lcd_uninitialize(void)
 {
     lcdinfo("board_lcd_uninitialize\n");
-    BSP_LCD_PowerDown();
-    sem_destroy(&(s_drv_lcd.draw_sem));
 
+    /* Gate new callers first */
+    s_lcd_hw_ready = false;
+
+    /* Unblock any thread waiting in wrram (sem_timedwait 200ms) */
+    sem_post(&s_drv_lcd.draw_sem);
+    usleep(300 * 1000);
+
+    /* Drain any remaining tokens */
+    while (sem_trywait(&s_drv_lcd.draw_sem) == 0) {}
+
+#ifdef SOC_BF0_HCPU
+    up_disable_irq(NX_IRQ(LCDC1_IRQn));
+    irq_detach(NX_IRQ(LCDC1_IRQn));
+#endif
+
+    pthread_mutex_lock(&s_drv_lcd.init_lock);
+    s_drv_lcd.p_drv_ops = NULL;
+    /* Broadcast to unblock any thread waiting in getvideoinfo/getplaneinfo */
+    s_drv_lcd.init_done = true;
+    pthread_cond_broadcast(&s_drv_lcd.init_cond);
+    pthread_mutex_unlock(&s_drv_lcd.init_lock);
+    usleep(10 * 1000);  /* Let unblocked threads exit */
+
+    BSP_LCD_PowerDown();
+
+    sem_destroy(&s_drv_lcd.draw_sem);
+    pthread_cond_destroy(&s_drv_lcd.init_cond);
+    pthread_mutex_destroy(&s_drv_lcd.init_lock);
+    pthread_mutex_destroy(&s_drv_lcd.conv_lock);
+}
+
+/****************************************************************************
+ * Name: board_lcd_notify_power_down
+ *
+ * Description:
+ *   Called by BSP_LCD_PowerDown() to notify the LCD driver that the panel
+ *   power has been cut.  The next frame write will trigger a full panel
+ *   re-initialization via ensure_display_on().
+ *
+ ****************************************************************************/
+
+void board_lcd_notify_power_down(void)
+{
+    pthread_mutex_lock(&s_drv_lcd.init_lock);
+    s_lcd_power_cycled = true;
+    /* Reset power so ensure_display_on knows to re-init */
+    s_drv_lcd.power = 0;
+    pthread_mutex_unlock(&s_drv_lcd.init_lock);
 }
 
