@@ -199,7 +199,7 @@ static void BSP_PIN_Common(void)
 //     HAL_PIN_Set_DS1(PAD_PA28, 1, 1);
 //     HAL_PIN_Set_DS1(PAD_PA29, 1, 1);
 
-    HAL_PIN_Set(PAD_PA32, GPTIM2_CH1, PIN_PULLUP, 1);   //  LED
+    HAL_PIN_Set(PAD_PA32, GPIO_A32, PIN_NOPULL, 1);     // RGB LED (WS2812 data)
 
     // GPIOs
     HAL_PIN_Set(PAD_PA26, GPIO_A26, PIN_NOPULL, 1);

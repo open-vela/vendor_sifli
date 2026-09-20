@@ -77,6 +77,10 @@ list(REMOVE_ITEM HAL_SRCS
     ${NUTTX_CHIP_ABS_DIR}/../drivers/hal/bf0_hal_qspi.c
     ${NUTTX_CHIP_ABS_DIR}/../drivers/hal/bf0_hal_qspi_ex.c)
 
+# Add SF32LB52X-specific audcodec HAL (uses Instance instead of Instance_hp)
+list(APPEND HAL_SRCS
+    ${NUTTX_CHIP_ABS_DIR}/../drivers/hal/bf0_hal_audcodec_m.c)
+
 # Add system initialization file
 set(SYSTEM_SRCS ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/sf32lb52x/Templates/system_bf0_ap.c
                 ${NUTTX_CHIP_ABS_DIR}/../drivers/cmsis/sf32lb52x/bf0_pin_const.c

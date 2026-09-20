@@ -295,6 +295,10 @@ static void LCD_Drv_Init(LCDC_HandleTypeDef *hlcdc)
     parameter[3] = (LCD_PIXEL_HEIGHT + ROW_OFFSET - 1) & 0xFF;
     LCD_WriteReg(hlcdc, REG_RASET, parameter, 4);
 
+    // Set display orientation to 180 degrees (MY + MX bits)
+    parameter[0] = 0xC0;
+    LCD_WriteReg(hlcdc, REG_MADCTL, parameter, 1);
+    
     LCD_WriteReg(hlcdc, REG_SLEEP_OUT, (uint8_t *)NULL, 0);
 
     //sleep out+display on

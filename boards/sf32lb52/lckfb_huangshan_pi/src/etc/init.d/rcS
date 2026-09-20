@@ -1,2 +1,3 @@
 sleep 3
-vapp hap://app/com.application.lyra.demo &
+vapp com.circle.home &
+

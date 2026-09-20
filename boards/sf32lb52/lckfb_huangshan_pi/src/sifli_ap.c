@@ -51,6 +51,10 @@
 #if defined(CONFIG_I2C) && defined(CONFIG_SENSORS_LSM6DSL)
 #  include <nuttx/sensors/lsm6dsl.h>
 #endif
+#if defined(CONFIG_UORB) && defined(CONFIG_SENSORS_LSM6DSL)
+#  include <sensor/accel.h>
+#  include <uORB/uORB.h>
+#endif
 #if defined(CONFIG_SPI) && defined(CONFIG_BSP_USING_SPI1)
 #  include <nuttx/spi/spi.h>
 #  include "sf32lb_spi.h"
@@ -62,6 +66,20 @@
 #if defined(CONFIG_SPI) && defined(CONFIG_MMCSD_SPI) && \
   defined(CONFIG_BSP_USING_SPI1)
 #  include <nuttx/mmcsd.h>
+#endif
+
+#ifdef CONFIG_BOARD_AUDIO_SF32LB
+#  include <nuttx/audio/audio.h>
+   FAR struct audio_lowerhalf_s *sf32lb_audio_initialize(void);
+#endif
+
+#ifdef CONFIG_WS2812
+   int sf32lb_ws2812_initialize(void);
+#endif
+
+#ifdef CONFIG_BATTERY_CHARGER
+   struct i2c_master_s;
+   int sf32lb_charger_initialize(FAR struct i2c_master_s *i2c);
 #endif
 
 #ifdef CONFIG_ADC
@@ -87,7 +105,7 @@ extern int sf32lb_nor_automount(int minor, int block_offset, int block_count);
 #endif
 
 #if defined(CONFIG_I2C) && defined(CONFIG_SENSORS_LSM6DSL)
-#  define SF32LB52_LSM6DS3_I2C_BUS     1
+#  define SF32LB52_LSM6DS3_I2C_BUS     0   /* LSM6DSL on I2C1 (PA39/PA40) */
 #  define SF32LB52_LSM6DS3_DEVPATH     "/dev/lsm6dsl0"
 #  define SF32LB52_LSM6DS3_LDO_PIN     GET_PIN_2(hwp_gpio1, 30)
 #  define SF32LB52_LSM6DS3_INT_PIN     GET_PIN_2(hwp_gpio1, 31)
@@ -205,21 +223,18 @@ static int sf32lb52_tfcard_initialize(void)
   spi = sf32lb52_spi1_getbus();
   if (spi == NULL)
     {
-      serr("ERROR: sifli_spibus_initialize(%d) failed\n",
-           SF32LB52_TFCARD_SPI_PORT);
+      serr("ERROR: sf32lb52_spi1_getbus failed\n");
       return -ENODEV;
     }
 
+  syslog(LOG_INFO, "TF: SPI1 device ready, calling mmcsd init\n");
   ret = mmcsd_spislotinitialize(SF32LB52_TFCARD_MINOR,
                                 SF32LB52_TFCARD_SLOT,
                                 spi);
-  if (ret < 0)
-    {
-      serr("ERROR: mmcsd_spislotinitialize failed: %d\n", ret);
-      return ret;
-    }
+  syslog(LOG_INFO, "TF: mmcsd_spislotinitialize returned: %d\n", ret);
 
   ret = sf32lb52_tfcard_mount();
+  syslog(LOG_INFO, "TF: tfcard_mount returned: %d\n", ret);
   if (ret < 0)
     {
       serr("WARN: TF mount failed: %d\n", ret);
@@ -276,6 +291,84 @@ static int sf32lb52_lsm6ds3_initialize(FAR struct i2c_master_s *i2c)
   syslog(LOG_INFO,
          "INFO: LSM6DS3 test device registered as %s, INT=%d\n",
          SF32LB52_LSM6DS3_DEVPATH, SF32LB52_LSM6DS3_INT_PIN);
+  return OK;
+}
+#endif
+
+#if defined(CONFIG_UORB) && defined(CONFIG_SENSORS_LSM6DSL)
+/****************************************************************************
+ * uORB Bridge Task
+ *
+ * Reads accelerometer data from /dev/lsm6dsl0 and publishes to uORB
+ * so that the QuickApp system.sensor feature can consume it.
+ ****************************************************************************/
+
+static int uorb_accel_bridge_task(int argc, FAR char *argv[])
+{
+  FILE *sensor;
+  struct lsm6dsl_sensor_data_s raw;
+  struct sensor_accel accel_msg;
+  int accel_pub;
+  int ret;
+
+  syslog(LOG_INFO, "[uorb_bridge] Starting accel bridge task\n");
+
+  /* Wait a bit for the sensor device to be ready */
+
+  usleep(500000);
+
+  sensor = fopen(SF32LB52_LSM6DS3_DEVPATH, "r");
+  if (sensor == NULL)
+    {
+      syslog(LOG_ERR, "[uorb_bridge] Cannot open %s: %d\n",
+             SF32LB52_LSM6DS3_DEVPATH, errno);
+      return -errno;
+    }
+
+  ret = ioctl(fileno(sensor), SNIOC_START, 0);
+  if (ret < 0)
+    {
+      syslog(LOG_WARNING, "[uorb_bridge] SNIOC_START failed: %d\n", ret);
+    }
+
+  /* Advertise the uORB topic */
+
+  accel_pub = orb_advertise(ORB_ID(sensor_accel), &accel_msg);
+  if (accel_pub < 0)
+    {
+      syslog(LOG_ERR, "[uorb_bridge] orb_advertise failed: %d\n", accel_pub);
+      fclose(sensor);
+      return accel_pub;
+    }
+
+  syslog(LOG_INFO, "[uorb_bridge] Bridge running, publishing to uORB\n");
+
+  /* Main loop: read sensor, publish to uORB */
+
+  for (; ; )
+    {
+      ret = ioctl(fileno(sensor), SNIOC_LSM6DSLSENSORREAD,
+                  (unsigned long)&raw);
+      if (ret < 0)
+        {
+          usleep(100000);
+          continue;
+        }
+
+      /* Convert to sensor_accel format (milli-g to float g) */
+
+      accel_msg.timestamp = raw.timestamp;
+      accel_msg.x = (float)raw.x_data / 1000.0f;
+      accel_msg.y = (float)raw.y_data / 1000.0f;
+      accel_msg.z = (float)raw.z_data / 1000.0f;
+      accel_msg.temperature = (float)raw.temperature / 1000.0f;
+
+      orb_publish(ORB_ID(sensor_accel), accel_pub, &accel_msg);
+
+      usleep(50000); /* 50ms = 20Hz */
+    }
+
+  fclose(sensor);
   return OK;
 }
 #endif
@@ -496,13 +589,9 @@ int sf32lb52_lchspi_ulp_bringup(void)
 #endif
 
 #ifdef CONFIG_BSP_USING_I2C2
-  /* Initialize I2C bus 1 for charger (AW32001). */
+  /* Initialize I2C bus 1 for charger (SY6103/AW32001). */
+  /* I2C2 pins (PA10/PA11) are configured in bsp_pinmux.c */
   struct i2c_master_s *i2c1 = NULL;
-
-#if defined(CONFIG_SENSORS_LSM6DSL)
-  HAL_PIN_Set(PAD_PA40, I2C2_SCL, PIN_PULLUP, 1);
-  HAL_PIN_Set(PAD_PA39, I2C2_SDA, PIN_PULLUP, 1);
-#endif
 
   i2c1 = sifli_i2cbus_initialize(1);
   if (i2c1 == NULL)
@@ -517,6 +606,18 @@ int sf32lb52_lchspi_ulp_bringup(void)
           syslog(LOG_ERR, "ERROR: i2c_register(/dev/i2c1) failed: %d\n", ret);
         }
 
+#ifdef CONFIG_BATTERY_CHARGER
+      {
+        syslog(LOG_INFO, "CHARGER: Initializing SY6103 charger...\n");
+        ret = sf32lb_charger_initialize(i2c1);
+        if (ret < 0)
+          {
+            syslog(LOG_ERR, "ERROR: sf32lb_charger_initialize failed: %d\n",
+                   ret);
+          }
+      }
+#endif
+
 #if defined(CONFIG_SENSORS_LSM6DSL)
       tmpret = sf32lb52_lsm6ds3_initialize(i2c1);
       if (tmpret < 0)
@@ -525,6 +626,12 @@ int sf32lb52_lchspi_ulp_bringup(void)
                  "ERROR: sf32lb52_lsm6ds3_initialize failed: %d\n",
                  tmpret);
         }
+#if defined(CONFIG_UORB)
+      /* Start uORB bridge task for QuickApp sensor access */
+
+      task_create("uorb_accel_bridge", SCHED_PRIORITY_DEFAULT,
+                  4096, uorb_accel_bridge_task, NULL);
+#endif
 #endif
     }
 #endif /* CONFIG_BSP_USING_I2C2 */
@@ -541,11 +648,47 @@ int sf32lb52_lchspi_ulp_bringup(void)
 
 #if defined(CONFIG_SPI) && defined(CONFIG_MMCSD_SPI) && \
     defined(CONFIG_BSP_USING_SPI1)
+  /* Enable VDD33_VOUT (LDO3) for TF card power supply */
+
+  HAL_PMU_ConfigPeriLdo(PMU_PERI_LDO3_3V3, true, true);
+  syslog(LOG_INFO, "TF: VDD33_VOUT LDO enabled\n");
+
   tmpret = sf32lb52_tfcard_initialize();
   if (tmpret < 0)
     {
       serr("WARN: TF card init failed: %d\n", tmpret);
     }
+#endif
+
+#ifdef CONFIG_BOARD_AUDIO_SF32LB
+  {
+    syslog(LOG_INFO, "AUDIO: Initializing audio driver...\n");
+    FAR struct audio_lowerhalf_s *audio = sf32lb_audio_initialize();
+    if (audio != NULL)
+      {
+        ret = audio_register("pcm0", audio);
+        syslog(LOG_INFO, "AUDIO: audio_register returned: %d\n", ret);
+        if (ret < 0)
+          {
+            serr("ERROR: audio_register failed: %d\n", ret);
+          }
+      }
+    else
+      {
+        syslog(LOG_ERR, "AUDIO: sf32lb_audio_initialize returned NULL\n");
+      }
+  }
+#endif
+
+#ifdef CONFIG_WS2812
+  {
+    syslog(LOG_INFO, "LED: Initializing WS2812 RGB LED...\n");
+    ret = sf32lb_ws2812_initialize();
+    if (ret < 0)
+      {
+        syslog(LOG_ERR, "ERROR: sf32lb_ws2812_initialize failed: %d\n", ret);
+      }
+  }
 #endif
 
 #ifdef CONFIG_LCD
