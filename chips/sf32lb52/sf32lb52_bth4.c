@@ -49,15 +49,16 @@
  */
 
 #define SF32LB52_HCI_ACL_TX_LEN  (SF32LB52_BT_MAX_H4_FRAME - 1 - 4)
-/* Port note (2026-10-12): 4 -> 8. The synthesised Read_Buffer_Size caps
- * in-flight ACL packets, and one 1500 B PAN/BNEP frame needs 4 fragments of
- * SF32LB52_HCI_ACL_TX_LEN (487 B) each, so 4 credits left the host waiting
- * for Number_Of_Completed_Packets after every single frame (~12 KB/s,
- * matching the 11.6 KB/s measured during TTS downloads). 8 keeps two frames
- * in flight without pretending more than the LCPU ring can absorb
- * (sf32lb52_bt_publish() drains the ring between frames). Verify on hardware
- * that ACL TX no longer stalls and no Hardware_Error appears. */
-#define SF32LB52_HCI_ACL_TX_PKTS 8
+/* Port note (2026-10-12): REVERTED 8 -> 4. Raising the synthesised credit
+ * count (this value is what the fake Read_Buffer_Size advertises) to 8 was
+ * meant to lift the ~12 KB/s ceiling, but on hardware it broke the data path:
+ * Edge TTS then reported `pass 1: delivered 0.00s / ~8.00s expected` and the
+ * voice reply disappeared entirely. The LCPU/mailbox ring is only 492 B and
+ * accepts one H4 frame per write, so advertising more in-flight ACL packets
+ * than it can drain just moves the loss into the closed LCPU firmware.
+ * The host-side window (CONFIG_BT_CONN_FRAG_COUNT / _TX_MAX) is the safe knob;
+ * this one must stay at the value the LCPU actually implements. */
+#define SF32LB52_HCI_ACL_TX_PKTS 4
 /* Per-chunk HCI tracing. It was pinned on through the whole bring-up, but it
  * emits a syslog line for every chunk the LCPU hands up, which on the BNEP
  * data path means one console write per ACL packet. Debug builds only. */
