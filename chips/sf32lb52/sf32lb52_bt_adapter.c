@@ -530,6 +530,26 @@ static void sf32lb52_bt_rx_worker(FAR void *arg)
 
           env->rx_read_idx_mirror = sf32lb52_bt_ring_advance(
               env->rx_read_idx_mirror, read_len, rx_ring->buffer_size);
+
+          /* Port note (2026-10-12, F2): read_idx_mirror (offset 8..11) and the
+           * LCPU-owned write_idx_mirror (12..15) share one cache line, so the
+           * up_clean_dcache() below writes our cached (stale) copy of the LCPU
+           * write pointer back to SRAM. The LCPU re-reads that field on every
+           * circular_buf_put(), so a stale write-back moves its write pointer
+           * BACKWARDS and it overwrites bytes we have not drained yet - seen
+           * on hardware as `drop invalid h4` bursts followed by L2CAP errors
+           * and TCP truncation. Re-invalidate and re-read the line here so the
+           * write-back carries the newest value; this shrinks the racy window
+           * from the memcpy above down to a few instructions. It is a
+           * mitigation, not a proof: both fields are still on one line. */
+          up_invalidate_dcache((uintptr_t)SF32LB52_BT_RX_BUF_ADDR,
+                               (uintptr_t)SF32LB52_BT_RX_BUF_ADDR +
+                               sizeof(*rx_ring));
+          {
+            volatile uint32_t fresh_wr = rx_ring->write_idx_mirror;
+
+            (void)fresh_wr;   /* 读一次即可: 让本行缓存与 LCPU 同步 */
+          }
           rx_ring->read_idx_mirror = env->rx_read_idx_mirror;
           __DSB();
 
