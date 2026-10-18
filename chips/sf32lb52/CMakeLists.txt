@@ -26,6 +26,10 @@ if(CONFIG_ADC)
     list(APPEND SRCS sf32lb_adc.c)
 endif()
 
+if(CONFIG_AUDIO)
+    list(APPEND SRCS sf32lb_audio.c)
+endif()
+
 if(CONFIG_RTC)
     list(APPEND SRCS sf32lb_rtc.c)
 endif()

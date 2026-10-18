@@ -344,6 +344,15 @@ int sf32lb52_lchspi_ulp_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_AUDIO
+  ret = sf32lb_audio_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: sf32lb_audio_initialize failed: %d\n", ret);
+      return ret;
+    }
+#endif
+
 #ifdef CONFIG_TIMER
 #if SF32LB_TIMER_DEFAULT_INDEX >= 0
   {

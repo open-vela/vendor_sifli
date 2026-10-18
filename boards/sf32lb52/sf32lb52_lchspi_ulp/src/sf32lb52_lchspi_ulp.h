@@ -48,5 +48,9 @@ int sf32lb52_button_initialize(const char *devname);
 int sifli_gpio_initialize(void);
 #endif
 
+#ifdef CONFIG_AUDIO
+int sf32lb_audio_initialize(void);
+#endif
+
 #endif /* __VENDOR_SIFLI_BOARDS_SF32LB52_SF32LB52_DEVKIT_LCD_SF32LB52_DEVKIT_LCD_H */
 
