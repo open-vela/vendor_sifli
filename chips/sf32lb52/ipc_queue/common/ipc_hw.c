@@ -60,7 +60,7 @@ int32_t ipc_hw_enable_interrupt(ipc_hw_q_handle_t *hw_q_handle, uint8_t qid,
 
     os_interrupt_start(ch_cfg->rx.irqn, 3, 0);
 
-    /* Unmask H2L (HCPU->LCPU) so LCPU's mailbox IRQ fires when HCPU writes
+    /* Unmask H2L (HCPU→LCPU) so LCPU's mailbox IRQ fires when HCPU writes
      * CxITR.  Per SiFli-SDK reference, each side unmasks its own TX mailbox
      * (the remote side's receive path) at open time.  The original vendor
      * copy incorrectly used rx.handle here, leaving H2L.CxIER=0 and LCPU
@@ -68,7 +68,7 @@ int32_t ipc_hw_enable_interrupt(ipc_hw_q_handle_t *hw_q_handle, uint8_t qid,
      */
     __HAL_MAILBOX_UNMASK_CHANNEL_IT(&ch_cfg->tx.handle, q_idx);
 
-    /* Also unmask L2H (LCPU->HCPU) so HCPU receives LCPU notifications.
+    /* Also unmask L2H (LCPU→HCPU) so HCPU receives LCPU notifications.
      * In the SiFli-SDK reference design LCPU unmasks L2H from its own side,
      * but we do it here too as a safety net for LCPU firmwares that skip it.
      */

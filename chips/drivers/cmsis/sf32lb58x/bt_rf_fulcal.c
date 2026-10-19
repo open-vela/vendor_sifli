@@ -2414,7 +2414,7 @@ uint32_t bt_rfc_edrlo_3g_cal(uint32_t rslt_start_addr)
                                 0x2 << BT_RFC_EDR_PLL_REG2_BRF_EDR_VCO_INCFCAL_VL_SEL_LV_Pos | \
                                 0x5 << BT_RFC_EDR_PLL_REG2_BRF_EDR_VCO_INCFCAL_VH_SEL_LV_Pos;
 
-    //when set edr_vco_ldo_vref for zero crc error test??set 8
+    //when set edr_vco_ldo_vref for zero crc error test��set 8
     hwp_bt_rfc->EDR_PLL_REG1 &= ~BT_RFC_EDR_PLL_REG1_BRF_EDR_VCO_LDO_VREF_LV;
     hwp_bt_rfc->EDR_PLL_REG1 |= 0xA << BT_RFC_EDR_PLL_REG1_BRF_EDR_VCO_LDO_VREF_LV_Pos;
 

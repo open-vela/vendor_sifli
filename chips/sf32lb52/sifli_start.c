@@ -194,7 +194,7 @@ void __start(void)
       *dest++ = *src++;
     }
 
-  arm_lowputc('A'); /* data segment init done */
+  arm_lowputc('A'); /* 表示数据段初始化完成 */
 
 #ifdef CONFIG_ARMV8M_ICACHE
   up_enable_icache();
@@ -203,14 +203,14 @@ void __start(void)
 #ifdef CONFIG_ARMV8M_DCACHE
   up_enable_dcache();
 #endif
-    arm_lowputc('B'); /* cache enable done */
+    arm_lowputc('B'); /* 表示cache启用完成 */
 
   /* Call HAL_Init() with interrupts disabled.
    * Some HAL functions may trigger hardware events that could
    * generate interrupts, but they won't fire while interrupts are disabled.
    */
   HAL_Init();
-    arm_lowputc('C'); /* HAL init done */
+    arm_lowputc('C'); /* 表示HAL初始化完成 */
 
   /* Disable SysTick that was enabled by HAL_Init().
    * NuttX uses its own timer system (LPTIM for tickless mode).
@@ -220,14 +220,14 @@ void __start(void)
   NVIC_SYSTICK_CTRL_REG = 0;  /* Disable SysTick completely */
 
 
-  arm_lowputc('D'); /* about to start system */
+  arm_lowputc('D'); /* 表示准备启动系统 */
 
   /* nx_start() will initialize the interrupt system and enable interrupts.
    * Interrupts remain disabled until the system is fully ready.
    */
   nx_start();
   
-  showprogress('X'); /* should never reach here */
+  showprogress('X'); /* 不应该到这里 */
 
   for (; ; );
 }

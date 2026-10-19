@@ -26,10 +26,6 @@ if(CONFIG_ADC)
     list(APPEND SRCS sf32lb_adc.c)
 endif()
 
-if(CONFIG_AUDIO)
-    list(APPEND SRCS sf32lb_audio.c)
-endif()
-
 if(CONFIG_RTC)
     list(APPEND SRCS sf32lb_rtc.c)
 endif()
@@ -111,3 +107,7 @@ target_include_directories(arch PRIVATE ${NUTTX_CHIP_ABS_DIR}/ipc_queue/porting/
 target_compile_options(arch PRIVATE 
     $<$<COMPILE_LANGUAGE:C>:-w>
     $<$<COMPILE_LANGUAGE:CXX>:-w>)
+
+if(CONFIG_AUDIO)
+    list(APPEND SRCS sf32lb_audio.c)
+endif()

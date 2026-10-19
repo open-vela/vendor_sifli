@@ -1268,7 +1268,7 @@ static int sf32lb52_interrupt(int irq, void *context, void *arg)
         }
       else if ((csr0 & USB_CSR0_TXPKTRDY) == 0)
         {
-          /* TXPKTRDY is clear -- either a previous IN transfer completed
+          /* TXPKTRDY is clear — either a previous IN transfer completed
            * or we're idle after status phase.
            */
 

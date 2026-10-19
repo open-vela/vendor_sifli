@@ -1140,7 +1140,7 @@ __HAL_ROM_USED void nor_qspi_switch(FLASH_HandleTypeDef *hflash, bool en)
         if (res == 0)
             srh = (uint8_t)HAL_FLASH_READ32(hflash) & 0XFF;
 
-        // set/clear QE bit ,for word access, it 2 bytes should merge to 1 word
+        // set/clear QE bit ，for word access, it 2 bytes should merge to 1 word
         if (en)
         {
             if (hflash->ctable->qe_mod_mask != 0)

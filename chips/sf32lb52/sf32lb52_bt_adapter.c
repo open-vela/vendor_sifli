@@ -775,7 +775,7 @@ int sf32lb52_bt_controller_enable(void)
   /* After every lcpu_power_on(), LCPU resets its TX ring write pointer
    * (write_idx_mirror) to 0 and writes its own boot responses into the
    * ring.  HCPU's read pointer (read_idx_mirror) may still hold the
-   * non-zero value from the previous session -- dirty in DCache or
+   * non-zero value from the previous session — dirty in DCache or
    * stored in SRAM.  If we do not synchronise them:
    *
    *   circular_buf_data_len() = wrap(write_idx - read_idx)

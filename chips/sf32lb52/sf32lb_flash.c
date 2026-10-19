@@ -264,7 +264,7 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void)
          "WARN: CONFIG_BSP_QSPI2_USING_DMA not enabled, NOR writes may fail\n");
 #endif
 
-  /* Ensure NOR is writable -- clear status register protection bits. */
+  /* Ensure NOR is writable — clear status register protection bits. */
 
   HAL_FLASH_CLR_PROTECT(hflash);
   sf32lb_flash_try_global_unlock(hflash);
@@ -1399,18 +1399,4 @@ int sf32lb_nor_automount(int minor, int block_offset, int block_count)
     }
 
   return OK;
-}
-
-/****************************************************************************
- * Name: sf32lb_flash_get_handle
- *
- * Description:
- *   Get the FLASH_HandleTypeDef pointer for the NOR flash on MPI2 (QSPI2).
- *   Used by board power management code for deep power-down / release.
- *
- ****************************************************************************/
-
-FLASH_HandleTypeDef *sf32lb_flash_get_handle(void)
-{
-    return &g_spi_nor_flash_ctx.handle;
 }

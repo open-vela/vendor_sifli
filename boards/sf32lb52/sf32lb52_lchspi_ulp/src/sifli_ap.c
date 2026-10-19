@@ -228,8 +228,6 @@ static int sf32lb52_tfcard_initialize(void)
 #define LCD_INIT_TASK_STACKSIZE 4096
 #define LCD_INIT_TASK_PRIORITY (SCHED_PRIORITY_DEFAULT - 5)
 
-static struct i2c_master_s *g_pending_touch_i2c = NULL;
-
 static int lcd_async_init_thread(int argc, FAR char *argv[])
 {
   int ret;
@@ -240,21 +238,6 @@ static int lcd_async_init_thread(int argc, FAR char *argv[])
       syslog(LOG_ERR, "ERROR: board_lcd_initialize failed: %d\n", ret);
       return ret;
     }
-
-#ifdef CONFIG_INPUT_FT6146
-  if (g_pending_touch_i2c != NULL)
-    {
-      usleep(80000);
-      ret = ft6146_touch_initialize(g_pending_touch_i2c,
-                                    GET_PIN_2(hwp_gpio1,
-                                              CONFIG_TOUCH_IRQ_PIN));
-      if (ret < 0)
-        {
-          syslog(LOG_ERR,
-                 "ERROR: ft6146_touch_initialize failed: %d\n", ret);
-        }
-    }
-#endif
 
   return OK;
 }
@@ -344,15 +327,6 @@ int sf32lb52_lchspi_ulp_bringup(void)
     }
 #endif
 
-#ifdef CONFIG_AUDIO
-  ret = sf32lb_audio_initialize();
-  if (ret < 0)
-    {
-      syslog(LOG_ERR, "ERROR: sf32lb_audio_initialize failed: %d\n", ret);
-      return ret;
-    }
-#endif
-
 #ifdef CONFIG_TIMER
 #if SF32LB_TIMER_DEFAULT_INDEX >= 0
   {
@@ -432,9 +406,7 @@ int sf32lb52_lchspi_ulp_bringup(void)
       return ret;
     }
 
-#if defined(CONFIG_INPUT_FT6146) && defined(CONFIG_LCD)
-  g_pending_touch_i2c = i2c0;
-#elif defined(CONFIG_INPUT_FT6146)
+#ifdef CONFIG_INPUT_FT6146
   ret = ft6146_touch_initialize(i2c0, GET_PIN_2(hwp_gpio1, CONFIG_TOUCH_IRQ_PIN));
   if (ret < 0)
     {
@@ -444,25 +416,7 @@ int sf32lb52_lchspi_ulp_bringup(void)
     }
 #endif
 
-#ifdef CONFIG_BSP_USING_I2C2
-  /* Initialize I2C bus 1 for charger (AW32001). */
-  struct i2c_master_s *i2c1 = NULL;
-
-  i2c1 = sifli_i2cbus_initialize(1);
-  if (i2c1 == NULL)
-    {
-      syslog(LOG_ERR, "ERROR: sifli_i2cbus_initialize(1) failed\n");
-    }
-  else
-    {
-      ret = i2c_register(i2c1, 1);
-      if (ret < 0)
-        {
-          syslog(LOG_ERR, "ERROR: i2c_register(/dev/i2c1) failed: %d\n", ret);
-        }
-    }
-#endif /* CONFIG_BSP_USING_I2C2 */
-#endif /* CONFIG_I2C */
+#endif  
 
 #if defined(CONFIG_SPI) && defined(CONFIG_BSP_USING_SPI1) && \
     defined(CONFIG_SPI_DRIVER)
