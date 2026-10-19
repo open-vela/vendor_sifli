@@ -368,6 +368,16 @@ int sf32lb52_lchspi_ulp_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_AUDIO
+  extern int sf32lb_audio_initialize(void);
+  ret = sf32lb_audio_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: sf32lb_audio_initialize failed: %d\n", ret);
+      return ret;
+    }
+#endif
+
 #if defined(CONFIG_RTC) && defined(CONFIG_RTC_DRIVER)
   struct rtc_lowerhalf_s *rtclower = NULL;
 

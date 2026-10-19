@@ -118,6 +118,7 @@ struct sf32lb_audio_s
   uint8_t                  did;        /* HAL channel id (DAC_CH0 / ADC_CH0) */
   uint8_t                 *alloc_addr; /* contiguous apb backing store      */
   uint8_t                  alloc_index;
+  size_t                     wr_off;
   bool                     xrun;
   bool                     running;
   struct dq_queue_s        pendq;      /* enqueued buffers in flight        */
@@ -182,6 +183,58 @@ int sf32lb_audio_adc0_dma_isr(int irq, void *context, void *arg);
  * Private Data
  ****************************************************************************/
 
+
+/* Write path: audio_write() forwards raw bytes here.  Lazily allocate the
+ * circular DMA backing store, copy app audio in at the write cursor.
+ */
+
+static ssize_t sf32lb_audio_write(struct audio_lowerhalf_s *dev,
+                                  const char *buffer, size_t buflen)
+{
+  struct sf32lb_audio_s *priv = (struct sf32lb_audio_s *)dev;
+  size_t ring = (size_t)priv->buffer_num * priv->buffer_size;
+  size_t off;
+
+  if (!priv->playback)
+    {
+      return -ENOSYS;
+    }
+
+  if (!priv->alloc_addr)
+    {
+      priv->alloc_addr = kumm_memalign(32, ring);
+      if (!priv->alloc_addr)
+        {
+          return -ENOMEM;
+        }
+      memset(priv->alloc_addr, 0, ring);
+      priv->wr_off = 0;
+    }
+
+  if (buflen > ring)
+    {
+      buffer += buflen - ring;
+      buflen = ring;
+    }
+
+  off = priv->wr_off % ring;
+  if (off + buflen <= ring)
+    {
+      memcpy(priv->alloc_addr + off, buffer, buflen);
+    }
+  else
+    {
+      size_t first = ring - off;
+      memcpy(priv->alloc_addr + off, buffer, first);
+      memcpy(priv->alloc_addr, buffer + first, buflen - first);
+    }
+
+  priv->wr_off += buflen;
+  up_clean_dcache((uintptr_t)priv->alloc_addr,
+                  (uintptr_t)priv->alloc_addr + ring);
+  return (ssize_t)buflen;
+}
+
 static const struct audio_ops_s g_sf32lb_audio_ops =
 {
   .getcaps       = sf32lb_audio_getcaps,
@@ -197,6 +250,7 @@ static const struct audio_ops_s g_sf32lb_audio_ops =
 #endif
   .allocbuffer   = sf32lb_audio_allocbuffer,
   .freebuffer    = sf32lb_audio_freebuffer,
+  .write         = sf32lb_audio_write,
   .enqueuebuffer = sf32lb_audio_enqueuebuffer,
   .ioctl         = sf32lb_audio_ioctl,
   .reserve       = sf32lb_audio_reserve,
@@ -657,6 +711,7 @@ static int sf32lb_audio_start(struct audio_lowerhalf_s *dev)
       return OK;
     }
 
+  syslog(LOG_ERR, "start: alloc_addr=%p\n", priv->alloc_addr);
   if (!priv->alloc_addr)
     {
       return -EINVAL;
@@ -858,6 +913,7 @@ static int sf32lb_audio_allocbuffer(struct audio_lowerhalf_s *dev,
   struct sf32lb_audio_s *priv = (struct sf32lb_audio_s *)dev;
   struct ap_buffer_s *apb;
 
+  syslog(LOG_ERR, "allocbuffer: numbytes=%d expect=%d\n", (int)bufdesc->numbytes, (int)priv->buffer_size);
   if (bufdesc->numbytes != priv->buffer_size)
     {
       return -EINVAL;

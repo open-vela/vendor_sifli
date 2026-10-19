@@ -54,6 +54,8 @@
 #define FT6146_REG_P1_XH       0x03
 #define FT6146_REG_ID_H        0xa3
 #define FT6146_REG_ID_L        0x9f
+#define FT6146_MAX_X           390
+#define FT6146_MAX_Y           450
 
 /****************************************************************************
  * Private Types
@@ -130,8 +132,10 @@ static void ft6146_data_worker(void *param)
   sample.npoints = 1;
   if (touch_num > 0)
     {
-      ft6146->last_x = ((uint16_t)(buf[1] & 0x0f) << 8) | buf[2];
-      ft6146->last_y = ((uint16_t)(buf[3] & 0x0f) << 8) | buf[4];
+      uint16_t raw_x = ((uint16_t)(buf[1] & 0x0f) << 8) | buf[2];
+      uint16_t raw_y = ((uint16_t)(buf[3] & 0x0f) << 8) | buf[4];
+      ft6146->last_x = (FT6146_MAX_X - 1) - raw_x;
+      ft6146->last_y = (FT6146_MAX_Y - 1) - raw_y;
       sample.point[0].flags = TOUCH_DOWN;
     }
   else
