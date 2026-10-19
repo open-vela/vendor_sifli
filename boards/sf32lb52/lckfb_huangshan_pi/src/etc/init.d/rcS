@@ -1,2 +1,2 @@
 sleep 3
-vapp hap://app/com.application.lyra.demo &
+vapp hap://app/com.netease.vela &

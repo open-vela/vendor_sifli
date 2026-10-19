@@ -1,2 +1,3 @@
 # Independent sub-repo (managed separately)
 boards/sf32lb52/libs/
+boards/sf32lb52/lckfb_huangshan_pi/src/etc/data/app
