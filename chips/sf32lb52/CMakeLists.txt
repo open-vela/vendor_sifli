@@ -24,6 +24,10 @@ set(SRCS sifli_start.c sifli_irq.c sifli_uart.c sifli_lowput.c
 
 if(CONFIG_ADC)
     list(APPEND SRCS sf32lb_adc.c)
+
+if(CONFIG_AUDIO)
+    list(APPEND SRCS sf32lb_audio.c)
+endif()
 endif()
 
 if(CONFIG_RTC)
@@ -108,6 +112,3 @@ target_compile_options(arch PRIVATE
     $<$<COMPILE_LANGUAGE:C>:-w>
     $<$<COMPILE_LANGUAGE:CXX>:-w>)
 
-if(CONFIG_AUDIO)
-    list(APPEND SRCS sf32lb_audio.c)
-endif()

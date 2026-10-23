@@ -163,7 +163,7 @@ void up_allocate_heap(FAR void **heap_start, size_t *heap_size)
   /* The heap starts at g_idle_topstack and extends to the end of SRAM */
   
   *heap_start = (FAR void *)g_idle_topstack;
-  *heap_size  = SRAM_END - g_idle_topstack;
+  *heap_size  = 0x2007FB00 - g_idle_topstack;  /* 181 rule 2: avoid H4 mailbox at 0x2007FE00 */
 }
 
 /******************************************************************************

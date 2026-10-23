@@ -1,2 +1,4 @@
 sleep 3
+mkdir /data/app
+cp -r /etc/data/app /data/app
 vapp hap://app/com.netease.vela &

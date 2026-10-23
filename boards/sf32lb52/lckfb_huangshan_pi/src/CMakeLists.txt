@@ -105,3 +105,12 @@ if(CONFIG_CRYPTO)
     SRCS
     md5_test.c)
 endif()
+
+# Override source-built libapps_vapp.a with prebuilt (has black-screen fix:
+# fb_path=/dev/lcd0 + UVLOOP deadlock fix + 30ms LVGL flush timer)
+add_custom_target(force_prebuilt_vapp ALL
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${NUTTX_BOARD_ABS_DIR}/../libs/nsh_cmake/libapps_vapp.a
+        ${CMAKE_BINARY_DIR}/apps/frameworks/runtimes/quickapp/libapps_vapp.a
+    COMMENT "Override source libapps_vapp.a with prebuilt (black-screen fix)")
+add_dependencies(board force_prebuilt_vapp)
