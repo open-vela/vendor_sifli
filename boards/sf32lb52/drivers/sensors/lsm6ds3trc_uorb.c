@@ -1,0 +1,1820 @@
+/****************************************************************************
+ * drivers/sensors/lsm6ds3trc_uorb.c
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.  The
+ * ASF licenses this file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance with the
+ * License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+ * License for the specific language governing permissions and limitations
+ * under the License.
+ *
+ ****************************************************************************/
+
+/****************************************************************************
+ * Included Files
+ ****************************************************************************/
+
+#include <unistd.h>
+#include <nuttx/config.h>
+#include <nuttx/nuttx.h>
+
+#include <nuttx/arch.h>
+#include <debug.h>
+
+#include <nuttx/fs/fs.h>
+#include <nuttx/i2c/i2c_master.h>
+#include <nuttx/kmalloc.h>
+#include <nuttx/kthread.h>
+#include <nuttx/mutex.h>
+#include <nuttx/semaphore.h>
+#include "lsm6ds3trc.h"
+#include <nuttx/sensors/sensor.h>
+#include <nuttx/signal.h>
+#include <stdio.h>
+#include <sys/types.h>
+
+/****************************************************************************
+ * Pre-processor Definitions
+ ****************************************************************************/
+
+/* Only float data type supported now */
+
+#ifdef CONFIG_SENSORS_USE_B16
+#  error fixed-point data type not supported yet
+#endif
+
+/* The value that should be in the WHO_AM_I register. */
+
+#define WHO_AM_I_VAL 0x6a
+
+/* Convert milli Gs to m/s^2 */
+
+#define MILLIG_TO_MS2 (0.0098067f)
+
+/* Convert milli-dps to rad/s */
+
+#define MDPS_TO_RADS (3.141592653f / (180.0f * 1000.0f))
+
+/* Registers */
+
+#define WHO_AM_I 0x0f   /* Hard-coded address on I2C bus. */
+#define STATUS_REG 0x1e /* The status register */
+#define CTRL1_XL 0x10   /* Accel control reg 1 */
+#define CTRL2_G 0x11    /* Gyro control reg 2 */
+#define CTRL3_C 0x12    /* Control reg 3 */
+#define INT1_CTRL 0x0d  /* INT1 pin control */
+#define INT2_CTRL 0x0e  /* INT2 pin control */
+#define OUT_TEMP_L 0x20 /* Temp output low byte. */
+#define OUT_TEMP_H 0x21 /* Temp output high byte. */
+#define OUTX_L_G 0x22   /* Gyro pitch axis (X) low byte. */
+#define OUTX_H_G 0x23   /* Gyro pitch axis (X) high byte. */
+#define OUTY_L_G 0x24   /* Gyro roll axis (Y) low byte. */
+#define OUTY_H_G 0x25   /* Gyro roll axis (Y) high byte. */
+#define OUTZ_L_G 0x26   /* Gyro yaw axis (Z) low byte. */
+#define OUTZ_H_G 0x27   /* Gyro yaw axis (Z) high byte. */
+#define OUTX_L_A 0x28   /* Accel (X) low byte. */
+#define OUTX_H_A 0x29   /* Accel (X) high byte. */
+#define OUTY_L_A 0x2a   /* Accel (Y) low byte. */
+#define OUTY_H_A 0x2b   /* Accel (Y) high byte. */
+#define OUTZ_L_A 0x2c   /* Accel (Z) low byte. */
+#define OUTZ_H_A 0x2d   /* Accel (Z) high byte. */
+
+#ifdef CONFIG_SENSORS_LSM6DS3TRC_FIFO
+#define FIFO_CTRL1 0x06      /* FIFO watermark threshold, low byte. */
+#define FIFO_CTRL2 0x07      /* FIFO watermark threshold, high bits. */
+#define FIFO_CTRL3 0x08      /* FIFO accel/gyro decimation. */
+#define FIFO_CTRL5 0x0a      /* FIFO mode and FIFO-only ODR. */
+#define FIFO_STATUS1 0x3a    /* FIFO unread word count, low byte. */
+#define FIFO_STATUS2 0x3b    /* FIFO unread word count high bits, flags. */
+#define FIFO_DATA_OUT_L 0x3e /* FIFO data output, low byte. */
+#define FIFO_DATA_OUT_H 0x3f /* FIFO data output, high byte. */
+#endif
+
+/* Bits */
+
+#define BIT_STATUS_XLDA (1 << 0) /* Accel data ready */
+#define BIT_STATUS_GDA (1 << 1)  /* Gyro data ready */
+#define BIT_STATUS_TDA (1 << 2)  /* Temp data ready */
+
+#define BIT_INT_DRDY_XL (1 << 0) /* INTn_CTRL: accel data-ready enable */
+#define BIT_INT_DRDY_G (1 << 1)  /* INTn_CTRL: gyro data-ready enable */
+
+#ifdef CONFIG_SENSORS_LSM6DS3TRC_FIFO
+#define BIT_INT_FTH (1 << 3) /* INTn_CTRL: FIFO threshold reached enable */
+
+#define BIT_FIFO_STATUS2_OVER_RUN (1 << 6) /* FIFO_STATUS2: overrun */
+#define MASK_FIFO_DIFF_HI 0x07             /* FIFO_STATUS2: DIFF_FIFO[10:8] */
+
+#define MASK_DEC_FIFO_XL 0x07   /* FIFO_CTRL3[2:0]: accel decimation */
+#define SHIFT_DEC_FIFO_GY 3     /* FIFO_CTRL3[5:3]: gyro decimation */
+#define DEC_FIFO_NONE 0x0       /* Sub-sensor excluded from the FIFO */
+#define DEC_FIFO_NO_DECIMATION 0x1
+
+#define SHIFT_FIFO_ODR 3        /* FIFO_CTRL5[6:3]: FIFO-only ODR */
+#define FIFO_MODE_BYPASS 0x0
+#define FIFO_MODE_CONTINUOUS 0x6
+#endif
+
+/****************************************************************************
+ * Private Types
+ ****************************************************************************/
+
+/* ODRs common to the accelerometer and the gyroscope. NOTE: this driver
+ * does not implement the 1.6Hz low power ODR for the accelerometer.
+ */
+
+enum lsm6ds3trc_odr_e
+{
+  ODR_OFF = 0x0,    /* Sensor Deactivated */
+  ODR_12_5HZ = 0x1, /* 12.5Hz Rate. */
+  ODR_26HZ = 0x2,   /* 26Hz Rate. */
+  ODR_52HZ = 0x3,   /* 52Hz Rate. */
+  ODR_104HZ = 0x4,  /* 104Hz Rate */
+  ODR_208HZ = 0x5,  /* 208Hz Rate */
+  ODR_416HZ = 0x6,  /* 416Hz Rate */
+  ODR_833HZ = 0x7,  /* 833Hz Rate */
+  ODR_1660HZ = 0x8, /* 1.66kHz Rate */
+  ODR_3330HZ = 0x9, /* 3.33kHz Rate */
+  ODR_6660HZ = 0xa, /* 6.66kHz Rate */
+};
+
+/* Gyroscope FSRs. Values already carry the FS_125 bit (bit1) combined
+ * with the FS_G bits (bits[3:2]), matching CTRL2_G's layout.
+ */
+
+enum lsm6ds3trc_fsr_gyro_e
+{
+  LSM6DS3TRC_FSR_GY_245DPS = 0x0,  /* +-245dps */
+  LSM6DS3TRC_FSR_GY_125DPS = 0x1,  /* +-125dps */
+  LSM6DS3TRC_FSR_GY_500DPS = 0x2,  /* +-500dps */
+  LSM6DS3TRC_FSR_GY_1000DPS = 0x4, /* +-1000dps */
+  LSM6DS3TRC_FSR_GY_2000DPS = 0x6, /* +-2000dps */
+};
+
+/* Accelerometer FSRs, matching CTRL1_XL's FS_XL bits[3:2] encoding. */
+
+enum lsm6ds3trc_fsr_xl_e
+{
+  LSM6DS3TRC_FSR_XL_2G = 0x0,  /* +-2g */
+  LSM6DS3TRC_FSR_XL_16G = 0x1, /* +-16g */
+  LSM6DS3TRC_FSR_XL_4G = 0x2,  /* +-4g */
+  LSM6DS3TRC_FSR_XL_8G = 0x3,  /* +-8g */
+};
+
+/* Represents a lower half sensor driver of the LSM6DS3TR-C */
+
+struct lsm6ds3trc_sens_s
+{
+  FAR struct sensor_lowerhalf_s lower; /* Lower-half sensor driver */
+  FAR struct lsm6ds3trc_dev_s *dev;    /* Reference to parent device */
+  bool enabled;                        /* If this sensor is enabled */
+  enum lsm6ds3trc_odr_e odr;           /* Measurement interval of this
+                                        * sensor, ODR_OFF while disabled */
+  enum lsm6ds3trc_odr_e last_odr;      /* Last ODR explicitly requested
+                                        * via set_interval(), ODR_OFF if
+                                        * never -- unlike odr, this
+                                        * survives being disabled, so
+                                        * activate() can restore it on
+                                        * the next enable instead of
+                                        * resetting to a fixed default */
+  int fsr;                             /* Full scale range of this sensor.
+                                        * Can be from either gyro or accel
+                                        * FSR enum. */
+  sem_t run;                           /* Polling cycle lock (kthread
+                                        * mode only) */
+};
+
+/* Represents the LSM6DS3TR-C IMU device */
+
+struct lsm6ds3trc_dev_s
+{
+  struct lsm6ds3trc_sens_s gyro;  /* Gyroscope lower half */
+  struct lsm6ds3trc_sens_s accel; /* Accelerometer lower half */
+  FAR struct i2c_master_s *i2c;   /* I2C interface. */
+  uint8_t addr;                   /* I2C address. */
+  mutex_t devlock;
+  bool interrupt_mode;            /* True if using the INT pin instead of
+                                   * kthread polling */
+  enum lsm6ds3trc_int_e int_pin;  /* Shared INT pin (interrupt mode only) */
+  int irq;                        /* IRQ number for int_pin, saved by the
+                                   * ISR so the worker can re-enable it */
+  struct work_s work;             /* Shared interrupt work queue
+                                   * structure -- one burst read serves
+                                   * both sub-sensors */
+  uint64_t timestamp;             /* When the burst became ready, taken
+                                   * in the ISR */
+#ifdef CONFIG_SENSORS_LSM6DS3TRC_FIFO
+  uint8_t fifo_pattern_words;     /* Words per repeating FIFO pattern:
+                                   * 3 (one sub-sensor active) or 6
+                                   * (both), 0 if neither is */
+  enum lsm6ds3trc_odr_e fifo_odr; /* Shared ODR currently driving
+                                   * FIFO_CTRL5 */
+  FAR int16_t *fifo_raw;          /* Drain buffer, FIFO_MAX_WORDS entries.
+                                   *
+                                   * On the heap, not the stack.
+                                   * FIFO_MAX_WORDS scales with
+                                   * CONFIG_SENSORS_LSM6DS3TRC_FIFO_
+                                   * WATERMARK, so at the watermark this
+                                   * board uses the old on-stack array was
+                                   * 6000 bytes inside an 8192-byte HPWORK
+                                   * stack -- 73% of it, before the call
+                                   * frame and the whole I2C stack below
+                                   * it.  The Kconfig default watermark of
+                                   * 8 needs only 192 bytes, which is
+                                   * presumably why this was never hit.
+                                   * Allocated once at registration so the
+                                   * drain path stays allocation free. */
+#endif
+};
+
+/****************************************************************************
+ * Private Function Prototypes
+ ****************************************************************************/
+
+static int lsm6ds3trc_control(FAR struct sensor_lowerhalf_s *lower,
+                              FAR struct file *filep, int cmd,
+                              unsigned long arg);
+static int lsm6ds3trc_activate(FAR struct sensor_lowerhalf_s *lower,
+                               FAR struct file *filep, bool enable);
+static int lsm6ds3trc_set_interval(FAR struct sensor_lowerhalf_s *lower,
+                                   FAR struct file *filep,
+                                   FAR uint32_t *period_us);
+static int lsm6ds3trc_get_info(FAR struct sensor_lowerhalf_s *lower,
+                               FAR struct file *filep,
+                               FAR struct sensor_device_info_s *info);
+
+/****************************************************************************
+ * Private Data
+ ****************************************************************************/
+
+/* ODR frequencies to measurement intervals in microseconds */
+
+static const uint32_t ODR_INTERVAL[] =
+{
+  0,      /* ODR_OFF */
+  80000,  /* ODR_12_5HZ */
+  38462,  /* ODR_26HZ */
+  19230,  /* ODR_52HZ */
+  9615,   /* ODR_104HZ */
+  4807,   /* ODR_208HZ */
+  2403,   /* ODR_416HZ */
+  1200,   /* ODR_833Hz */
+  602,    /* ODR_1660HZ */
+  300,    /* ODR_3330HZ */
+  150,    /* ODR_6660HZ */
+};
+
+/* Accelerometer FSR sensitivities in m/s^2 per LSB */
+
+static const float FSR_XL_SENS[] =
+{
+  0.061f * MILLIG_TO_MS2, /* 2g */
+  0.488f * MILLIG_TO_MS2, /* 16g */
+  0.122f * MILLIG_TO_MS2, /* 4g */
+  0.244f * MILLIG_TO_MS2, /* 8g */
+};
+
+/* Gyro FSR sensitivities in rad/s per LSB */
+
+static const float FSR_GYRO_SENS[] =
+{
+  8.75f * MDPS_TO_RADS,  /* LSM6DS3TRC_FSR_GY_245DPS */
+  4.375f * MDPS_TO_RADS, /* LSM6DS3TRC_FSR_GY_125DPS */
+  17.50f * MDPS_TO_RADS, /* LSM6DS3TRC_FSR_GY_500DPS */
+  0.0f,                  /* No such setting (3) */
+  35.0f * MDPS_TO_RADS,  /* LSM6DS3TRC_FSR_GY_1000DPS */
+  0.0f,                  /* No such setting (5) */
+  70.0f * MDPS_TO_RADS,  /* LSM6DS3TRC_FSR_GY_2000DPS */
+};
+
+/* Interrupt control registers, indexed by lsm6ds3trc_int_e */
+
+static const uint8_t INT_CTRL[] =
+{
+  INT1_CTRL, /* INT1 */
+  INT2_CTRL, /* INT2 */
+};
+
+/* Sensor operations. .fetch stays NULL either way -- data arrives
+ * exclusively via push_event(), from the kthreads, the per-sample DRDY
+ * worker, or (CONFIG_SENSORS_LSM6DS3TRC_FIFO) the FIFO-draining worker
+ * below. selftest/set_calibvalue/calibrate are left unimplemented for
+ * now; the upper half tolerates NULL here.
+ */
+
+static const struct sensor_ops_s g_sensor_ops =
+{
+  .fetch          = NULL,
+  .activate       = lsm6ds3trc_activate,
+  .control        = lsm6ds3trc_control,
+  .set_interval   = lsm6ds3trc_set_interval,
+  .selftest       = NULL,
+  .set_calibvalue = NULL,
+  .calibrate      = NULL,
+  .get_info       = lsm6ds3trc_get_info,
+};
+
+/****************************************************************************
+ * Private Functions
+ ****************************************************************************/
+
+/****************************************************************************
+ * Name: lsm6ds3trc_write_bytes
+ *
+ * Description:
+ *   Write bytes to the LSM6DS3TR-C sensor. Providing more than one byte
+ *   will write to sequential registers starting at the provided address.
+ *
+ ****************************************************************************/
+
+static int lsm6ds3trc_write_bytes(FAR struct lsm6ds3trc_dev_s *priv,
+                                  uint8_t addr, void *buf, size_t nbytes)
+{
+  struct i2c_msg_s cmd[2];
+
+  /* Register addressing part of command. */
+
+  cmd[0].frequency = CONFIG_SENSORS_LSM6DS3TRC_I2C_FREQUENCY;
+  cmd[0].addr = priv->addr;
+  cmd[0].flags = 0;
+  cmd[0].buffer = &addr;
+  cmd[0].length = sizeof(addr);
+
+  /* Data to write. */
+
+  cmd[1].frequency = CONFIG_SENSORS_LSM6DS3TRC_I2C_FREQUENCY;
+  cmd[1].addr = priv->addr;
+  cmd[1].flags = 0;
+  cmd[1].buffer = buf;
+  cmd[1].length = nbytes;
+
+  return I2C_TRANSFER(priv->i2c, cmd, 2);
+}
+
+/****************************************************************************
+ * Name: lsm6ds3trc_read_bytes
+ *
+ * Description:
+ *   Read bytes from the LSM6DS3TR-C sensor. Reading more than one byte
+ *   will read from sequential registers starting at the provided address.
+ *
+ ****************************************************************************/
+
+static int lsm6ds3trc_read_bytes(FAR struct lsm6ds3trc_dev_s *priv,
+                                 uint8_t addr, void *buf, size_t nbytes)
+{
+  struct i2c_msg_s cmd[2];
+
+  /* Register addressing part of command. */
+
+  cmd[0].frequency = CONFIG_SENSORS_LSM6DS3TRC_I2C_FREQUENCY;
+  cmd[0].addr = priv->addr;
+  cmd[0].flags = 0;
+  cmd[0].buffer = &addr;
+  cmd[0].length = sizeof(addr);
+
+  /* Read data into buffer. */
+
+  cmd[1].frequency = CONFIG_SENSORS_LSM6DS3TRC_I2C_FREQUENCY;
+  cmd[1].addr = priv->addr;
+  cmd[1].flags = I2C_M_READ;
+  cmd[1].buffer = buf;
+  cmd[1].length = nbytes;
+
+  return I2C_TRANSFER(priv->i2c, cmd, 2);
+}
+
+/****************************************************************************
+ * Name: lsm6ds3trc_set_bits
+ *
+ * Description:
+ *   Read current value of desired register and change specified bits
+ *   while preserving previous ones.
+ *   NOTE: Clear operation performed before set operation.
+ *
+ ****************************************************************************/
+
+static int lsm6ds3trc_set_bits(FAR struct lsm6ds3trc_dev_s *priv,
+                               uint8_t addr, uint8_t set_bits,
+                               uint8_t clear_bits)
+{
+  int err;
+  uint8_t reg;
+
+  err = lsm6ds3trc_read_bytes(priv, addr, &reg, sizeof(reg));
+  if (err < 0)
+    {
+      return err;
+    }
+
+  reg = (reg & ~clear_bits) | set_bits;
+  return lsm6ds3trc_write_bytes(priv, addr, &reg, sizeof(reg));
+}
+
+/****************************************************************************
+ * Name: accel_set_odr
+ ****************************************************************************/
+
+static int accel_set_odr(FAR struct lsm6ds3trc_dev_s *dev,
+                         enum lsm6ds3trc_odr_e odr)
+{
+  int err;
+
+  err = lsm6ds3trc_set_bits(dev, CTRL1_XL, (odr & 0xf) << 4, 0xf0);
+  if (err < 0)
+    {
+      return err;
+    }
+
+  dev->accel.odr = odr;
+  return err;
+}
+
+/****************************************************************************
+ * Name: gyro_set_odr
+ ****************************************************************************/
+
+static int gyro_set_odr(FAR struct lsm6ds3trc_dev_s *dev,
+                        enum lsm6ds3trc_odr_e odr)
+{
+  int err;
+
+  err = lsm6ds3trc_set_bits(dev, CTRL2_G, (odr & 0xf) << 4, 0xf0);
+  if (err < 0)
+    {
+      return err;
+    }
+
+  dev->gyro.odr = odr;
+  return err;
+}
+
+/****************************************************************************
+ * Name: accel_set_fsr
+ ****************************************************************************/
+
+static int accel_set_fsr(FAR struct lsm6ds3trc_dev_s *dev,
+                         enum lsm6ds3trc_fsr_xl_e fsr)
+{
+  int err;
+
+  err = lsm6ds3trc_set_bits(dev, CTRL1_XL, (fsr & 0x3) << 2, 0x0c);
+  if (err < 0)
+    {
+      return err;
+    }
+
+  dev->accel.fsr = fsr;
+  return err;
+}
+
+/****************************************************************************
+ * Name: gyro_set_fsr
+ ****************************************************************************/
+
+static int gyro_set_fsr(FAR struct lsm6ds3trc_dev_s *dev,
+                        enum lsm6ds3trc_fsr_gyro_e fsr)
+{
+  int err;
+
+  err = lsm6ds3trc_set_bits(dev, CTRL2_G, (fsr & 0x7) << 1, 0x0e);
+  if (err < 0)
+    {
+      return err;
+    }
+
+  dev->gyro.fsr = fsr;
+  return err;
+}
+
+/****************************************************************************
+ * Name: lsm6ds3trc_int_enable
+ *
+ * Description:
+ *   Set or clear one sub-sensor's data-ready bit in the shared INTn_CTRL
+ *   register (interrupt mode only). Both DRDY_XL and DRDY_G can be OR'd
+ *   onto the same pin, so this only ever touches the single bit that
+ *   belongs to the caller -- the other sub-sensor's bit, if set, is left
+ *   alone by the read-modify-write in lsm6ds3trc_set_bits().
+ *
+ ****************************************************************************/
+
+static int lsm6ds3trc_int_enable(FAR struct lsm6ds3trc_dev_s *dev,
+                                 uint8_t bit, bool enable)
+{
+  uint8_t reg = INT_CTRL[dev->int_pin];
+
+  return lsm6ds3trc_set_bits(dev, reg, enable ? bit : 0, bit);
+}
+
+#ifdef CONFIG_SENSORS_LSM6DS3TRC_FIFO
+/****************************************************************************
+ * Name: lsm6ds3trc_fifo_configure
+ *
+ * Description:
+ *   Re-derive and write the FIFO decimation (which sub-sensor(s) feed the
+ *   FIFO), the shared FIFO ODR, and the watermark threshold from the
+ *   current dev->gyro/accel enabled+odr state. Called after any change to
+ *   that state (activate() and set_interval()). Both sub-sensors always
+ *   run at the same ODR while FIFO is on -- see the driver's FIFO
+ *   documentation for why.
+ *
+ ****************************************************************************/
+
+static int lsm6ds3trc_fifo_configure(FAR struct lsm6ds3trc_dev_s *dev)
+{
+  uint8_t dec = 0;
+  uint8_t words = 0;
+  enum lsm6ds3trc_odr_e odr = ODR_OFF;
+  uint16_t watermark_words;
+  uint8_t ctrl1;
+  int err;
+
+  if (dev->gyro.enabled)
+    {
+      dec |= DEC_FIFO_NO_DECIMATION << SHIFT_DEC_FIFO_GY;
+      words += 3;
+      odr = dev->gyro.odr;
+    }
+
+  if (dev->accel.enabled)
+    {
+      dec |= DEC_FIFO_NO_DECIMATION;
+      words += 3;
+      odr = dev->accel.odr;
+    }
+
+  dev->fifo_pattern_words = words;
+  dev->fifo_odr = odr;
+
+  /* The FIFO's data-ready write trigger only fires while BOTH the
+   * accelerometer and the gyroscope are physically running, regardless
+   * of which one(s) are actually decimated into the pattern above --
+   * force whichever sub-sensor isn't subscribed to run at the shared
+   * rate anyway (still excluded from the pattern, so it costs no extra
+   * I2C bandwidth on drain, just its own unavoidable power draw), and
+   * bring it back down once neither is subscribed. See the driver's
+   * FIFO documentation.
+   */
+
+  if (!dev->gyro.enabled)
+    {
+      err = gyro_set_odr(dev, words != 0 ? odr : ODR_OFF);
+      if (err < 0)
+        {
+          return err;
+        }
+    }
+
+  if (!dev->accel.enabled)
+    {
+      err = accel_set_odr(dev, words != 0 ? odr : ODR_OFF);
+      if (err < 0)
+        {
+          return err;
+        }
+    }
+
+  /* Reconfiguring decimation/watermark/ODR while the pattern generator
+   * is still running in Continuous mode leaves FIFO_STATUS1/2 stuck
+   * reporting a stale diff count -- reset through Bypass mode first
+   * (which also empties the FIFO), same as the datasheet's documented
+   * procedure for changing FIFO settings, and only re-enter Continuous
+   * mode once every other register below is already in its new state.
+   */
+
+  err = lsm6ds3trc_set_bits(dev, FIFO_CTRL5, FIFO_MODE_BYPASS, 0x07);
+  if (err < 0)
+    {
+      return err;
+    }
+
+  err = lsm6ds3trc_set_bits(dev, FIFO_CTRL3, dec,
+                            MASK_DEC_FIFO_XL |
+                            (MASK_DEC_FIFO_XL << SHIFT_DEC_FIFO_GY));
+  if (err < 0 || words == 0)
+    {
+      return err;
+    }
+
+  watermark_words = (uint16_t)CONFIG_SENSORS_LSM6DS3TRC_FIFO_WATERMARK *
+                    words;
+
+  ctrl1 = watermark_words & 0xff;
+  err = lsm6ds3trc_write_bytes(dev, FIFO_CTRL1, &ctrl1, sizeof(ctrl1));
+  if (err < 0)
+    {
+      return err;
+    }
+
+  err = lsm6ds3trc_set_bits(dev, FIFO_CTRL2, (watermark_words >> 8) & 0x07,
+                            0x07);
+  if (err < 0)
+    {
+      return err;
+    }
+
+  return lsm6ds3trc_set_bits(dev, FIFO_CTRL5,
+                            ((odr & 0xf) << SHIFT_FIFO_ODR) |
+                            FIFO_MODE_CONTINUOUS,
+                            0x7f);
+}
+#endif
+
+/****************************************************************************
+ * Name: lsm6ds3trc_convert_temp
+ ****************************************************************************/
+
+static float lsm6ds3trc_convert_temp(int16_t temp)
+{
+  return (float)((temp / 256) + 25);
+}
+
+/****************************************************************************
+ * Name: lsm6ds3trc_read_gyro
+ ****************************************************************************/
+
+static int lsm6ds3trc_read_gyro(FAR struct lsm6ds3trc_dev_s *dev,
+                                FAR struct sensor_gyro *data)
+{
+  int16_t raw_data[4]; /* Holds 1 temp, 3 gyro (xyz) */
+  int err;
+
+  err = lsm6ds3trc_read_bytes(dev, OUT_TEMP_L, raw_data, sizeof(raw_data));
+  if (err < 0)
+    {
+      return err;
+    }
+
+  data->timestamp = sensor_get_timestamp();
+  data->temperature = lsm6ds3trc_convert_temp(raw_data[0]);
+  data->x = (float)(raw_data[1]) * FSR_GYRO_SENS[dev->gyro.fsr];
+  data->y = (float)(raw_data[2]) * FSR_GYRO_SENS[dev->gyro.fsr];
+  data->z = (float)(raw_data[3]) * FSR_GYRO_SENS[dev->gyro.fsr];
+
+  return err;
+}
+
+/****************************************************************************
+ * Name: lsm6ds3trc_read_accel
+ ****************************************************************************/
+
+static int lsm6ds3trc_read_accel(FAR struct lsm6ds3trc_dev_s *dev,
+                                 FAR struct sensor_accel *data)
+{
+  int16_t raw_data[3]; /* 3 accel (xyz) */
+  int16_t raw_temp;    /* Temperature */
+  int err;
+
+  err = lsm6ds3trc_read_bytes(dev, OUTX_L_A, raw_data, sizeof(raw_data));
+  if (err < 0)
+    {
+      return err;
+    }
+
+  err = lsm6ds3trc_read_bytes(dev, OUT_TEMP_L, &raw_temp, sizeof(raw_temp));
+  if (err < 0)
+    {
+      return err;
+    }
+
+  data->timestamp = sensor_get_timestamp();
+  data->temperature = lsm6ds3trc_convert_temp(raw_temp);
+  data->x = (float)(raw_data[0]) * FSR_XL_SENS[dev->accel.fsr];
+  data->y = (float)(raw_data[1]) * FSR_XL_SENS[dev->accel.fsr];
+  data->z = (float)(raw_data[2]) * FSR_XL_SENS[dev->accel.fsr];
+
+  return err;
+}
+
+/****************************************************************************
+ * Name: push_gyro
+ ****************************************************************************/
+
+static int push_gyro(FAR struct lsm6ds3trc_dev_s *dev)
+{
+  int err;
+  struct sensor_gyro data;
+
+  err = nxmutex_lock(&dev->devlock);
+  if (err < 0)
+    {
+      return err;
+    }
+
+  err = lsm6ds3trc_read_gyro(dev, &data);
+  if (err < 0)
+    {
+      goto early_ret;
+    }
+
+  dev->gyro.lower.push_event(dev->gyro.lower.priv, &data, sizeof(data));
+
+early_ret:
+  nxmutex_unlock(&dev->devlock);
+  return err;
+}
+
+/****************************************************************************
+ * Name: push_accel
+ ****************************************************************************/
+
+static int push_accel(FAR struct lsm6ds3trc_dev_s *dev)
+{
+  int err;
+  struct sensor_accel data;
+
+  err = nxmutex_lock(&dev->devlock);
+  if (err < 0)
+    {
+      return err;
+    }
+
+  err = lsm6ds3trc_read_accel(dev, &data);
+  if (err < 0)
+    {
+      goto early_ret;
+    }
+
+  dev->accel.lower.push_event(dev->accel.lower.priv, &data, sizeof(data));
+
+early_ret:
+  nxmutex_unlock(&dev->devlock);
+  return err;
+}
+
+/****************************************************************************
+ * Name: gyro_thread
+ *
+ * Description:
+ *   Polling thread for gyroscope measurements (kthread mode only).
+ *
+ ****************************************************************************/
+
+static int gyro_thread(int argc, char **argv)
+{
+  FAR struct lsm6ds3trc_dev_s *dev =
+      (FAR struct lsm6ds3trc_dev_s *)((uintptr_t)strtoul(argv[1], NULL, 16));
+  int err = 0;
+
+  while (true)
+    {
+      if (!dev->gyro.enabled)
+        {
+          err = nxsem_wait(&dev->gyro.run);
+          if (err < 0)
+            {
+              continue;
+            }
+        }
+
+      err = push_gyro(dev);
+      if (err < 0)
+        {
+          continue;
+        }
+
+      usleep(ODR_INTERVAL[dev->gyro.odr]);
+    }
+
+  return err;
+}
+
+/****************************************************************************
+ * Name: accel_thread
+ *
+ * Description:
+ *   Polling thread for accelerometer measurements (kthread mode only).
+ *   See gyro_thread.
+ *
+ ****************************************************************************/
+
+static int accel_thread(int argc, char **argv)
+{
+  FAR struct lsm6ds3trc_dev_s *dev =
+      (FAR struct lsm6ds3trc_dev_s *)((uintptr_t)strtoul(argv[1], NULL, 16));
+  int err = 0;
+
+  while (true)
+    {
+      if (!dev->accel.enabled)
+        {
+          err = nxsem_wait(&dev->accel.run);
+          if (err < 0)
+            {
+              continue;
+            }
+        }
+
+      err = push_accel(dev);
+      if (err < 0)
+        {
+          continue;
+        }
+
+      usleep(ODR_INTERVAL[dev->accel.odr]);
+    }
+
+  return err;
+}
+
+#ifdef CONFIG_SENSORS_LSM6DS3TRC_FIFO
+/* Room for 2x the configured watermark (both sub-sensors' worth of
+ * words), so a drain that runs a bit late -- mutex contention, scheduler
+ * latency -- still fits in one read instead of silently falling further
+ * behind. Whatever doesn't fit stays in the chip's FIFO for the next
+ * drain; nothing is lost as long as the real FIFO (2KB) doesn't fill.
+ */
+
+#define FIFO_MAX_WORDS \
+  (CONFIG_SENSORS_LSM6DS3TRC_FIFO_WATERMARK * 6 * 2)
+
+/****************************************************************************
+ * Name: lsm6ds3trc_fifo_worker
+ *
+ * Description:
+ *   Interrupt mode only, CONFIG_SENSORS_LSM6DS3TRC_FIFO build. Runs on the
+ *   FIFO threshold (FTH) interrupt instead of per-sample DRDY: reads how
+ *   many words are waiting (FIFO_STATUS1/2), bursts them out of
+ *   FIFO_DATA_OUT_L/H, and walks the buffer in dev->fifo_pattern_words
+ *   chunks (3 words for one active sub-sensor, 6 for both -- see
+ *   lsm6ds3trc_fifo_configure()), pushing one event per chunk. Each
+ *   chunk's timestamp is interpolated backwards from dev->timestamp (the
+ *   newest sample, taken in the ISR) by the configured ODR interval,
+ *   since individual FIFO entries don't carry their own timestamp.
+ *
+ ****************************************************************************/
+
+static void lsm6ds3trc_fifo_worker_body(FAR struct lsm6ds3trc_dev_s *dev)
+{
+  uint8_t status[2];
+  FAR int16_t *raw = dev->fifo_raw;
+  int16_t raw_temp;
+  float temp_c;
+  uint16_t diff_words;
+  uint16_t nwords;
+  uint32_t interval;
+  int nsamples;
+  int i;
+  int err;
+
+  err = nxmutex_lock(&dev->devlock);
+  if (err < 0)
+    {
+      return;
+    }
+
+  if (dev->fifo_pattern_words == 0)
+    {
+      nxmutex_unlock(&dev->devlock);
+      return;
+    }
+
+  err = lsm6ds3trc_read_bytes(dev, FIFO_STATUS1, status, sizeof(status));
+  if (err < 0)
+    {
+      nxmutex_unlock(&dev->devlock);
+      snerr("ERROR: Failed to read FIFO status: %d\n", err);
+      return;
+    }
+
+  diff_words = (uint16_t)status[0] |
+               (((uint16_t)status[1] & MASK_FIFO_DIFF_HI) << 8);
+
+  if (status[1] & BIT_FIFO_STATUS2_OVER_RUN)
+    {
+      snerr("WARNING: LSM6DS3TR-C FIFO overrun, some samples were lost\n");
+
+      /* diff_words reads 0 here, not the FIFO's actual (still full)
+       * content -- confirmed on hardware (a forced read past this point
+       * recovers real, valid samples) and independently confirmed by
+       * ST's own engineers for this chip family: once Continuous mode
+       * genuinely overruns, DIFF_FIFO resets to 0 while OVER_RUN/WaterM/
+       * FIFO_FULL_SMART stay set (see ST's community forum, thread
+       * "LSM6DS3 FIFO status clarification", td-p/184022).
+       * Recovering the still-present data would mean assuming the
+       * FIFO is at capacity rather than trusting diff_words -- skipped
+       * here on purpose: with the small watermark this driver uses,
+       * reaching a real overrun at all means the drain has already
+       * fallen many seconds behind, and ST's own guidance for this
+       * condition is to avoid it via watermark sizing rather than
+       * recover from it. The mainline Linux st_lsm6dsx driver, for the
+       * same chip family, doesn't attempt recovery here either -- it
+       * only special-cases an empty FIFO, not an overrun one.
+       */
+    }
+
+  /* Round down to a whole number of pattern chunks -- never split one
+   * sample's words across two drains.
+   */
+
+  nwords = diff_words;
+  if (nwords > FIFO_MAX_WORDS)
+    {
+      nwords = FIFO_MAX_WORDS;
+    }
+
+  nwords -= nwords % dev->fifo_pattern_words;
+
+  if (nwords == 0)
+    {
+      nxmutex_unlock(&dev->devlock);
+      return;
+    }
+
+  err = lsm6ds3trc_read_bytes(dev, FIFO_DATA_OUT_L, raw,
+                              nwords * sizeof(int16_t));
+  if (err < 0)
+    {
+      uint8_t ctrl5;
+
+      snerr("ERROR: Failed to read FIFO data: %d\n", err);
+
+      /* Recover instead of wedging: a FIFO left above watermark holds
+       * level-triggered INT1 asserted, re-entering this worker forever.
+       * Emptying it through Bypass costs one batch but deasserts the line;
+       * restore the previous mode bits to keep fifo_configure()'s ODR.
+       */
+
+      if (lsm6ds3trc_read_bytes(dev, FIFO_CTRL5, &ctrl5, 1) >= 0)
+        {
+          lsm6ds3trc_set_bits(dev, FIFO_CTRL5, FIFO_MODE_BYPASS, 0x07);
+          lsm6ds3trc_set_bits(dev, FIFO_CTRL5, ctrl5 & 0x07, 0x07);
+        }
+
+      nxmutex_unlock(&dev->devlock);
+      return;
+    }
+
+  /* Temperature isn't part of the FIFO pattern (FIFO_TEMP_EN stays off,
+   * see lsm6ds3trc_fifo_configure()) -- one direct read at drain time,
+   * applied to every sample in this batch, is close enough for a value
+   * that barely moves between drains.
+   */
+
+  err = lsm6ds3trc_read_bytes(dev, OUT_TEMP_L, &raw_temp, sizeof(raw_temp));
+  nxmutex_unlock(&dev->devlock);
+
+  if (err < 0)
+    {
+      snerr("ERROR: Failed to read temperature: %d\n", err);
+      return;
+    }
+
+  temp_c = lsm6ds3trc_convert_temp(raw_temp);
+  nsamples = nwords / dev->fifo_pattern_words;
+  interval = ODR_INTERVAL[dev->fifo_odr];
+
+  for (i = 0; i < nsamples; i++)
+    {
+      FAR int16_t *sample = &raw[i * dev->fifo_pattern_words];
+      uint64_t timestamp = dev->timestamp -
+                           (uint64_t)(nsamples - 1 - i) * interval;
+      int off = 0;
+
+      if (dev->gyro.enabled)
+        {
+          struct sensor_gyro gyro_data;
+          float sens = FSR_GYRO_SENS[dev->gyro.fsr];
+
+          gyro_data.timestamp = timestamp;
+          gyro_data.temperature = temp_c;
+          gyro_data.x = (float)sample[off + 0] * sens;
+          gyro_data.y = (float)sample[off + 1] * sens;
+          gyro_data.z = (float)sample[off + 2] * sens;
+
+          dev->gyro.lower.push_event(dev->gyro.lower.priv, &gyro_data,
+                                     sizeof(gyro_data));
+          off += 3;
+        }
+
+      if (dev->accel.enabled)
+        {
+          struct sensor_accel accel_data;
+          float sens = FSR_XL_SENS[dev->accel.fsr];
+
+          accel_data.timestamp = timestamp;
+          accel_data.temperature = temp_c;
+          accel_data.x = (float)sample[off + 0] * sens;
+          accel_data.y = (float)sample[off + 1] * sens;
+          accel_data.z = (float)sample[off + 2] * sens;
+
+          dev->accel.lower.push_event(dev->accel.lower.priv, &accel_data,
+                                      sizeof(accel_data));
+        }
+    }
+}
+
+/****************************************************************************
+ * Name: lsm6ds3trc_fifo_worker
+ *
+ * Description:
+ *   work_queue() entry point. Re-enables the IRQ lsm6ds3trc_interrupt()
+ *   disabled, after the FIFO has actually been drained -- see the comment
+ *   on lsm6ds3trc_interrupt() for why the order matters.
+ *
+ ****************************************************************************/
+
+static void lsm6ds3trc_fifo_worker(FAR void *arg)
+{
+  FAR struct lsm6ds3trc_dev_s *dev = arg;
+
+  lsm6ds3trc_fifo_worker_body(dev);
+  up_enable_irq(dev->irq);
+}
+
+#else
+/****************************************************************************
+ * Name: lsm6ds3trc_worker
+ *
+ * Description:
+ *   Interrupt mode only. Bursts temperature + gyro xyz + accel xyz in one
+ *   contiguous I2C read (OUT_TEMP_L..OUTZ_H_A is 14 sequential bytes) and
+ *   pushes whichever of the two topics is currently subscribed. Mirrors
+ *   the MPU6050 driver's single-worker design instead of running two
+ *   independent interrupt paths for one physical chip.
+ *
+ ****************************************************************************/
+
+static void lsm6ds3trc_worker_body(FAR struct lsm6ds3trc_dev_s *dev)
+{
+  int16_t raw[7]; /* temp, gx, gy, gz, ax, ay, az */
+  struct sensor_gyro gyro_data;
+  struct sensor_accel accel_data;
+  float temp_c;
+  int err;
+
+  err = nxmutex_lock(&dev->devlock);
+  if (err < 0)
+    {
+      return;
+    }
+
+  err = lsm6ds3trc_read_bytes(dev, OUT_TEMP_L, raw, sizeof(raw));
+  nxmutex_unlock(&dev->devlock);
+
+  if (err < 0)
+    {
+      snerr("ERROR: Failed to read measurement: %d\n", err);
+      return;
+    }
+
+  temp_c = lsm6ds3trc_convert_temp(raw[0]);
+
+  if (dev->gyro.enabled)
+    {
+      gyro_data.timestamp = dev->timestamp;
+      gyro_data.temperature = temp_c;
+      gyro_data.x = (float)raw[1] * FSR_GYRO_SENS[dev->gyro.fsr];
+      gyro_data.y = (float)raw[2] * FSR_GYRO_SENS[dev->gyro.fsr];
+      gyro_data.z = (float)raw[3] * FSR_GYRO_SENS[dev->gyro.fsr];
+
+      dev->gyro.lower.push_event(dev->gyro.lower.priv, &gyro_data,
+                                 sizeof(gyro_data));
+    }
+
+  if (dev->accel.enabled)
+    {
+      accel_data.timestamp = dev->timestamp;
+      accel_data.temperature = temp_c;
+      accel_data.x = (float)raw[4] * FSR_XL_SENS[dev->accel.fsr];
+      accel_data.y = (float)raw[5] * FSR_XL_SENS[dev->accel.fsr];
+      accel_data.z = (float)raw[6] * FSR_XL_SENS[dev->accel.fsr];
+
+      dev->accel.lower.push_event(dev->accel.lower.priv, &accel_data,
+                                  sizeof(accel_data));
+    }
+}
+
+/****************************************************************************
+ * Name: lsm6ds3trc_worker
+ *
+ * Description:
+ *   work_queue() entry point. Re-enables the IRQ lsm6ds3trc_interrupt()
+ *   disabled, after the measurement has actually been drained -- see the
+ *   comment on lsm6ds3trc_interrupt() for why the order matters.
+ *
+ ****************************************************************************/
+
+static void lsm6ds3trc_worker(FAR void *arg)
+{
+  FAR struct lsm6ds3trc_dev_s *dev = arg;
+
+  lsm6ds3trc_worker_body(dev);
+  up_enable_irq(dev->irq);
+}
+#endif
+
+/****************************************************************************
+ * Name: lsm6ds3trc_interrupt
+ *
+ * Description:
+ *   ISR for the shared INT pin. Timestamps here, where the burst really
+ *   became ready -- the I2C read cannot run in interrupt context, so it's
+ *   deferred to lsm6ds3trc_worker()/lsm6ds3trc_fifo_worker() on HPWORK.
+ *
+ *   The IRQ is disabled here and only re-enabled once the worker has
+ *   drained the condition that raised it: if a PM wake source ever leaves
+ *   this pin level-triggered instead of edge-triggered (or the line is
+ *   simply slow to fall), leaving the IRQ enabled would re-fire it
+ *   continuously and starve every task, including the worker that would
+ *   otherwise clear it.
+ *
+ ****************************************************************************/
+
+static int lsm6ds3trc_interrupt(int irq, FAR void *context, FAR void *arg)
+{
+  FAR struct lsm6ds3trc_dev_s *dev = (FAR struct lsm6ds3trc_dev_s *)(arg);
+  int err;
+
+  (void)(context);
+
+  DEBUGASSERT(arg != NULL);
+
+  dev->irq = irq;
+  up_disable_irq(irq);
+
+  dev->timestamp = sensor_get_timestamp();
+
+#ifdef CONFIG_SENSORS_LSM6DS3TRC_FIFO
+  err = work_queue(HPWORK, &dev->work, lsm6ds3trc_fifo_worker, dev, 0);
+#else
+  err = work_queue(HPWORK, &dev->work, lsm6ds3trc_worker, dev, 0);
+#endif
+  if (err < 0)
+    {
+      snerr("Could not queue LSM6DS3TR-C work queue: %d\n", err);
+    }
+
+  return err;
+}
+
+/****************************************************************************
+ * Name: lsm6ds3trc_activate
+ ****************************************************************************/
+
+static int lsm6ds3trc_activate(FAR struct sensor_lowerhalf_s *lower,
+                               FAR struct file *filep, bool enable)
+{
+  FAR struct lsm6ds3trc_sens_s *sens =
+      container_of(lower, FAR struct lsm6ds3trc_sens_s, lower);
+  FAR struct lsm6ds3trc_dev_s *dev = sens->dev;
+  bool is_gyro = lower->type == SENSOR_TYPE_GYROSCOPE;
+  bool start_thread = false;
+  int err;
+
+  err = nxmutex_lock(&dev->devlock);
+  if (err < 0)
+    {
+      return err;
+    }
+
+  /* Start collecting data continuously and enable the thread if not
+   * already enabled.
+   */
+
+  if (enable && !sens->enabled)
+    {
+      FAR struct lsm6ds3trc_sens_s *other = is_gyro ? &dev->accel
+                                                     : &dev->gyro;
+      enum lsm6ds3trc_odr_e odr;
+
+      start_thread = true;
+
+      /* Restore whatever ODR was last explicitly requested for this
+       * sub-sensor (via set_interval()), if any -- ODR_52HZ only
+       * applies the first time this sub-sensor is ever activated.
+       */
+
+      odr = sens->last_odr != ODR_OFF ? sens->last_odr : ODR_52HZ;
+
+#ifdef CONFIG_SENSORS_LSM6DS3TRC_FIFO
+      /* ...but both sub-sensors share one FIFO write rate: joining
+       * whatever the other one is already running at takes priority
+       * over this sub-sensor's own remembered rate, since FIFO mode
+       * doesn't allow them to differ.
+       */
+
+      if (other->enabled)
+        {
+          odr = other->odr;
+        }
+#endif
+
+      err = is_gyro ? gyro_set_odr(dev, odr) : accel_set_odr(dev, odr);
+      if (err < 0)
+        {
+          goto early_ret;
+        }
+
+#ifndef CONFIG_SENSORS_LSM6DS3TRC_FIFO
+      if (dev->interrupt_mode)
+        {
+          err = lsm6ds3trc_int_enable(dev, is_gyro ? BIT_INT_DRDY_G
+                                                    : BIT_INT_DRDY_XL, true);
+          if (err < 0)
+            {
+              goto early_ret;
+            }
+        }
+#endif
+    }
+
+  /* Turn off the sensor if we're disabling */
+
+  if (!enable && sens->enabled)
+    {
+      err = is_gyro ? gyro_set_odr(dev, ODR_OFF)
+                     : accel_set_odr(dev, ODR_OFF);
+      if (err < 0)
+        {
+          goto early_ret;
+        }
+
+#ifndef CONFIG_SENSORS_LSM6DS3TRC_FIFO
+      if (dev->interrupt_mode)
+        {
+          err = lsm6ds3trc_int_enable(dev,
+                                       is_gyro ? BIT_INT_DRDY_G :
+                                                 BIT_INT_DRDY_XL,
+                                       false);
+          if (err < 0)
+            {
+              goto early_ret;
+            }
+        }
+#endif
+    }
+
+  sens->enabled = enable;
+
+#ifdef CONFIG_SENSORS_LSM6DS3TRC_FIFO
+  if (dev->interrupt_mode)
+    {
+      err = lsm6ds3trc_fifo_configure(dev);
+      if (err < 0)
+        {
+          goto early_ret;
+        }
+
+      err = lsm6ds3trc_int_enable(dev, BIT_INT_FTH,
+                                  dev->fifo_pattern_words != 0);
+      if (err < 0)
+        {
+          goto early_ret;
+        }
+    }
+#endif
+
+  if (start_thread && !dev->interrupt_mode)
+    {
+      sninfo("Waking up LSM6DS3TR-C polling thread");
+      err = nxsem_post(&sens->run);
+    }
+
+early_ret:
+  nxmutex_unlock(&dev->devlock);
+  return err;
+}
+
+/****************************************************************************
+ * Name: lsm6ds3trc_set_interval
+ ****************************************************************************/
+
+static int lsm6ds3trc_set_interval(FAR struct sensor_lowerhalf_s *lower,
+                                   FAR struct file *filep,
+                                   FAR uint32_t *period_us)
+{
+  FAR struct lsm6ds3trc_sens_s *sens =
+      container_of(lower, FAR struct lsm6ds3trc_sens_s, lower);
+  FAR struct lsm6ds3trc_dev_s *dev = sens->dev;
+  int err;
+  enum lsm6ds3trc_odr_e odr;
+
+  if (*period_us >= 80000)
+    {
+      odr = ODR_12_5HZ;
+    }
+  else if (*period_us >= 38462)
+    {
+      odr = ODR_26HZ;
+    }
+  else if (*period_us >= 19231)
+    {
+      odr = ODR_52HZ;
+    }
+  else if (*period_us >= 9615)
+    {
+      odr = ODR_104HZ;
+    }
+  else if (*period_us >= 4808)
+    {
+      odr = ODR_208HZ;
+    }
+  else if (*period_us >= 2404)
+    {
+      odr = ODR_416HZ;
+    }
+  else if (*period_us >= 1200)
+    {
+      odr = ODR_833HZ;
+    }
+  else if (*period_us >= 602)
+    {
+      odr = ODR_1660HZ;
+    }
+  else if (*period_us >= 300)
+    {
+      odr = ODR_3330HZ;
+    }
+  else
+    {
+      odr = ODR_6660HZ;
+    }
+
+  err = nxmutex_lock(&dev->devlock);
+  if (err < 0)
+    {
+      return err;
+    }
+
+  if (lower->type == SENSOR_TYPE_ACCELEROMETER)
+    {
+      err = accel_set_odr(dev, odr);
+    }
+  else if (lower->type == SENSOR_TYPE_GYROSCOPE)
+    {
+      err = gyro_set_odr(dev, odr);
+    }
+
+  if (err < 0)
+    {
+      goto early_ret;
+    }
+
+  /* Remember this explicit request so activate() can restore it on the
+   * next enable, instead of resetting to a fixed default -- unlike
+   * sens->odr, this isn't touched by disabling the sensor.
+   */
+
+  sens->last_odr = odr;
+
+#ifdef CONFIG_SENSORS_LSM6DS3TRC_FIFO
+  /* Both sub-sensors share one FIFO write rate -- re-pace whichever one
+   * this call didn't target, if it's currently enabled, then let
+   * fifo_configure() re-derive FIFO_CTRL5's ODR and the watermark
+   * threshold for the new rate.
+   */
+
+  if (dev->interrupt_mode)
+    {
+      if (lower->type == SENSOR_TYPE_ACCELEROMETER && dev->gyro.enabled)
+        {
+          err = gyro_set_odr(dev, odr);
+        }
+      else if (lower->type == SENSOR_TYPE_GYROSCOPE && dev->accel.enabled)
+        {
+          err = accel_set_odr(dev, odr);
+        }
+
+      if (err < 0)
+        {
+          goto early_ret;
+        }
+
+      err = lsm6ds3trc_fifo_configure(dev);
+      if (err < 0)
+        {
+          goto early_ret;
+        }
+    }
+#endif
+
+  *period_us = ODR_INTERVAL[odr];
+
+early_ret:
+  nxmutex_unlock(&dev->devlock);
+  return err;
+}
+
+/****************************************************************************
+ * Name: lsm6ds3trc_get_info
+ ****************************************************************************/
+
+static int lsm6ds3trc_get_info(FAR struct sensor_lowerhalf_s *lower,
+                               FAR struct file *filep,
+                               FAR struct sensor_device_info_s *info)
+{
+  FAR struct lsm6ds3trc_sens_s *sens =
+      container_of(lower, FAR struct lsm6ds3trc_sens_s, lower);
+
+  memset(info, 0, sizeof(struct sensor_device_info_s));
+  info->version = 0;
+  info->power = 0.29f; /* 0.29mA combo LP @52Hz, AN5130 typical @1.8V */
+  memcpy(info->name, "LSM6DS3TR-C", sizeof("LSM6DS3TR-C"));
+  memcpy(info->vendor, "STMicro", sizeof("STMicro"));
+
+#ifdef CONFIG_SENSORS_LSM6DS3TRC_FIFO
+  info->fifo_reserved_event_count = CONFIG_SENSORS_LSM6DS3TRC_FIFO_WATERMARK;
+
+  if (sens->dev->fifo_pattern_words != 0)
+    {
+      /* The chip's FIFO is 2048 words deep, shared between however many
+       * words each sample takes in the currently active pattern.
+       */
+
+      info->fifo_max_event_count = 2048 / sens->dev->fifo_pattern_words;
+    }
+#endif
+
+  if (lower->type == SENSOR_TYPE_GYROSCOPE)
+    {
+      info->resolution = FSR_GYRO_SENS[sens->fsr];
+      info->max_range = FSR_GYRO_SENS[sens->fsr] * INT16_MAX;
+      info->min_delay = (int32_t)ODR_INTERVAL[ODR_12_5HZ];
+      info->max_delay = (int32_t)ODR_INTERVAL[ODR_12_5HZ];
+    }
+  else if (lower->type == SENSOR_TYPE_ACCELEROMETER)
+    {
+      info->resolution = FSR_XL_SENS[sens->fsr];
+      info->max_range = FSR_XL_SENS[sens->fsr] * INT16_MAX;
+      info->max_delay = (int32_t)ODR_INTERVAL[ODR_12_5HZ];
+      info->min_delay = (int32_t)ODR_INTERVAL[ODR_12_5HZ];
+    }
+
+  return 0;
+}
+
+/****************************************************************************
+ * Name: lsm6ds3trc_control
+ ****************************************************************************/
+
+static int lsm6ds3trc_control(FAR struct sensor_lowerhalf_s *lower,
+                              FAR struct file *filep, int cmd,
+                              unsigned long arg)
+{
+  FAR struct lsm6ds3trc_sens_s *sens =
+      container_of(lower, FAR struct lsm6ds3trc_sens_s, lower);
+  FAR struct lsm6ds3trc_dev_s *dev = sens->dev;
+  int err;
+
+  err = nxmutex_lock(&dev->devlock);
+  if (err < 0)
+    {
+      return err;
+    }
+
+  switch (cmd)
+    {
+      case SNIOC_WHO_AM_I:
+        {
+          FAR uint8_t *id = (FAR uint8_t *)(arg);
+
+          if (id == NULL)
+            {
+              err = -EINVAL;
+              break;
+            }
+
+          err = lsm6ds3trc_read_bytes(dev, WHO_AM_I, id, sizeof(uint8_t));
+        }
+        break;
+
+      case SNIOC_SETFULLSCALE:
+        {
+          if (lower->type == SENSOR_TYPE_ACCELEROMETER)
+            {
+              switch (arg)
+                {
+                  case 2:
+                    err = accel_set_fsr(dev, LSM6DS3TRC_FSR_XL_2G);
+                    break;
+
+                  case 4:
+                    err = accel_set_fsr(dev, LSM6DS3TRC_FSR_XL_4G);
+                    break;
+
+                  case 8:
+                    err = accel_set_fsr(dev, LSM6DS3TRC_FSR_XL_8G);
+                    break;
+
+                  case 16:
+                    err = accel_set_fsr(dev, LSM6DS3TRC_FSR_XL_16G);
+                    break;
+
+                  default:
+                    err = -EINVAL;
+                    break;
+                }
+            }
+          else if (lower->type == SENSOR_TYPE_GYROSCOPE)
+            {
+              switch (arg)
+                {
+                  case 125:
+                    err = gyro_set_fsr(dev, LSM6DS3TRC_FSR_GY_125DPS);
+                    break;
+
+                  case 245:
+                    err = gyro_set_fsr(dev, LSM6DS3TRC_FSR_GY_245DPS);
+                    break;
+
+                  case 500:
+                    err = gyro_set_fsr(dev, LSM6DS3TRC_FSR_GY_500DPS);
+                    break;
+
+                  case 1000:
+                    err = gyro_set_fsr(dev, LSM6DS3TRC_FSR_GY_1000DPS);
+                    break;
+
+                  case 2000:
+                    err = gyro_set_fsr(dev, LSM6DS3TRC_FSR_GY_2000DPS);
+                    break;
+
+                  default:
+                    err = -EINVAL;
+                    break;
+                }
+            }
+          else
+            {
+              err = -EINVAL;
+            }
+        }
+        break;
+
+      default:
+        err = -EINVAL;
+        break;
+    }
+
+  nxmutex_unlock(&dev->devlock);
+  return err;
+}
+
+/****************************************************************************
+ * Public Functions
+ ****************************************************************************/
+
+/****************************************************************************
+ * Name: lsm6ds3trc_register
+ ****************************************************************************/
+
+int lsm6ds3trc_register(FAR struct i2c_master_s *i2c, uint8_t addr,
+                        uint8_t devno,
+                        FAR struct lsm6ds3trc_config_s *config)
+{
+  FAR struct lsm6ds3trc_dev_s *priv;
+  int err;
+  FAR char *argv[2];
+  char arg1[32];
+  int gyro_pid = -1;
+
+  DEBUGASSERT(i2c != NULL);
+  DEBUGASSERT(config != NULL);
+  DEBUGASSERT(addr == 0x6a || addr == 0x6b);
+
+#if !defined(CONFIG_SCHED_HPWORK)
+  if (config->attach != NULL)
+    {
+      snerr("CONFIG_SCHED_HPWORK required for interrupt driven measuring.");
+      return -ENOSYS;
+    }
+#endif
+
+  priv = kmm_zalloc(sizeof(struct lsm6ds3trc_dev_s));
+  if (priv == NULL)
+    {
+      snerr("ERROR: Failed to allocate instance of LSM6DS3TR-C driver.\n");
+      return -ENOMEM;
+    }
+
+  priv->i2c = i2c;
+
+#ifdef CONFIG_SENSORS_LSM6DS3TRC_FIFO
+  priv->fifo_raw = kmm_malloc(FIFO_MAX_WORDS * sizeof(int16_t));
+  if (priv->fifo_raw == NULL)
+    {
+      snerr("ERROR: no memory for the %d-byte FIFO drain buffer\n",
+            (int)(FIFO_MAX_WORDS * sizeof(int16_t)));
+      kmm_free(priv);
+      return -ENOMEM;
+    }
+#endif
+
+  priv->addr = addr;
+  priv->interrupt_mode = config->attach != NULL;
+  priv->int_pin = config->int_pin;
+
+  nxmutex_init(&priv->devlock);
+
+  nxsem_init(&priv->gyro.run, 0, 0);
+
+  nxsem_init(&priv->accel.run, 0, 0);
+
+  /* Create gyro lower half */
+
+  priv->gyro.lower.type = SENSOR_TYPE_GYROSCOPE;
+  priv->gyro.lower.ops = &g_sensor_ops;
+  priv->gyro.lower.nbuffer = CONFIG_SENSORS_LSM6DS3TRC_GYRO_ORB_BUFSIZE;
+  priv->gyro.enabled = false;
+  priv->gyro.odr = ODR_OFF;
+  priv->gyro.last_odr = ODR_OFF;
+  priv->gyro.fsr = LSM6DS3TRC_FSR_GY_245DPS;
+  priv->gyro.dev = priv;
+
+  err = sensor_register(&priv->gyro.lower, devno);
+  if (err < 0)
+    {
+      snerr("Failed to register LSM6DS3TR-C gyroscope lower half: %d\n",
+            err);
+      goto del_accel_sem;
+    }
+
+  /* Create accel lower half */
+
+  priv->accel.lower.type = SENSOR_TYPE_ACCELEROMETER;
+  priv->accel.lower.ops = &g_sensor_ops;
+  priv->accel.lower.nbuffer = CONFIG_SENSORS_LSM6DS3TRC_ACCEL_ORB_BUFSIZE;
+  priv->accel.enabled = false;
+  priv->accel.odr = ODR_OFF;
+  priv->accel.last_odr = ODR_OFF;
+  priv->accel.fsr = LSM6DS3TRC_FSR_XL_4G; /* Default 4g, per project notes */
+  priv->accel.dev = priv;
+
+  err = sensor_register(&priv->accel.lower, devno);
+  if (err < 0)
+    {
+      snerr("Failed to register LSM6DS3TR-C accelerometer lower half: "
+            "%d\n", err);
+      goto unreg_gyro;
+    }
+
+  /* Put the sensor into its power-on register state before anything else
+   * touches it, and in particular before the interrupt is attached.
+   *
+   * The LSM6DS3TR-C has its own supply and its own reset: a plain MCU
+   * reset does not reset the sensor, so it comes up still holding
+   * whatever the previous session configured.  For this driver that
+   * means INT1_CTRL.INT1_FTH still set and a FIFO still over its
+   * watermark -- i.e. INT1 asserted, immediately, at registration time.
+   *
+   * The board is expected to configure INT1 as level-triggered (a FIFO
+   * watermark is a level condition, not a pulse).  Arming an interrupt
+   * on a line that is already active when config->attach() enables it
+   * can re-fire continuously and wedge the caller with no diagnostic
+   * output, depending on the arch's own interrupt-controller behavior.
+   *
+   * SW_RESET (CTRL3_C bit 0) clears INT1_CTRL and FIFO_CTRL back to 0,
+   * which deasserts INT1.  It self-clears in ~50us; poll rather than
+   * assume, and carry on if the sensor does not answer -- a sensor that
+   * cannot be reset is a problem for the caller to report, not a reason
+   * to arm an interrupt line we know may be stuck high.
+   */
+
+  {
+    uint8_t ctrl3_c;
+    int attempt;
+    int tries;
+    bool reset_done = false;
+
+    /* The I2C bus is not always ready the instant we get here -- a write
+     * at this point has been seen to fail with -EIO on a cold boot.  Give
+     * it a few attempts with a short pause between them.
+     */
+
+    for (attempt = 0; attempt < 3 && !reset_done; attempt++)
+      {
+        ctrl3_c = 0x01;                 /* SW_RESET */
+
+        err = lsm6ds3trc_write_bytes(priv, CTRL3_C, &ctrl3_c, 1);
+        if (err < 0)
+          {
+            snwarn("Software reset write failed (attempt %d): %d\n",
+                   attempt + 1, err);
+            nxsig_usleep(10000);
+            continue;
+          }
+
+        for (tries = 0; tries < 20; tries++)
+          {
+            nxsig_usleep(1000);
+
+            if (lsm6ds3trc_read_bytes(priv, CTRL3_C, &ctrl3_c, 1) >= 0 &&
+                (ctrl3_c & 0x01) == 0)
+              {
+                reset_done = true;
+                break;
+              }
+          }
+      }
+
+    /* Carry on even if it never took.  Not resetting the sensor risks the
+     * interrupt storm this reset exists to prevent (see the comment
+     * above), but that is a far better failure than refusing to register
+     * the device at all: an unregistered sensor leaves the application
+     * with no /dev/uorb/sensor_accel0 to open, which is fatal to it.
+     * Losing the whole sensor to protect against a maybe-storm is the
+     * wrong trade -- a single -EIO here has taken a board down completely
+     * before.
+     */
+
+    if (!reset_done)
+      {
+        snerr("Software reset did not complete; continuing unreset. "
+              "INT1 may already be asserted -- watch for an IRQ storm.\n");
+      }
+
+    err = OK;
+  }
+
+  /* Write CTRL1_XL's FS_XL bits to match the software default above --
+   * ODR is set later by activate(), but FSR needs to be right from the
+   * first sample instead of only after an explicit SNIOC_SETFULLSCALE.
+   */
+
+  err = accel_set_fsr(priv, priv->accel.fsr);
+  if (err < 0)
+    {
+      snerr("Failed to set default accel FSR: %d\n", err);
+      goto unreg_accel;
+    }
+
+  if (priv->interrupt_mode)
+    {
+      /* One shared handler for both sub-sensors: each DRDY bit is
+       * enabled/disabled independently by activate() as topics are
+       * subscribed, but there's only one ISR and one HPWORK worker.
+       */
+
+      err = config->attach(lsm6ds3trc_interrupt, priv);
+      if (err < 0)
+        {
+          snerr("Failed to register interrupt handler: %d\n", err);
+          goto unreg_accel;
+        }
+
+      sninfo("LSM6DS3TR-C interrupt handler attached to %s.",
+             priv->int_pin == LSM6DS3TRC_INT1 ? "INT1" : "INT2");
+    }
+  else
+    {
+      /* Gyro polling thread */
+
+      snprintf(arg1, 16, "%p", priv);
+      argv[0] = arg1;
+      argv[1] = NULL;
+      err = kthread_create("lsm6ds3trc_gy_thread", SCHED_PRIORITY_DEFAULT,
+                           CONFIG_SENSORS_LSM6DS3TRC_THREAD_STACKSIZE,
+                           gyro_thread, argv);
+      if (err < 0)
+        {
+          snerr("Failed to register gyro polling thread: %d\n", err);
+          goto unreg_accel;
+        }
+
+      gyro_pid = err;
+      sninfo("LSM6DS3TR-C gyro using polling thread.");
+
+      /* Accel polling thread */
+
+      snprintf(arg1, 16, "%p", priv);
+      argv[0] = arg1;
+      argv[1] = NULL;
+      err = kthread_create("lsm6ds3trc_xl_thread", SCHED_PRIORITY_DEFAULT,
+                           CONFIG_SENSORS_LSM6DS3TRC_THREAD_STACKSIZE,
+                           accel_thread, argv);
+      if (err < 0)
+        {
+          snerr("Failed to register accel polling thread: %d\n", err);
+          goto unreg_gyro_thread;
+        }
+
+      sninfo("LSM6DS3TR-C accel using polling thread.");
+    }
+
+  sninfo("LSM6DS3TR-C driver registered!");
+  return OK;
+
+unreg_gyro_thread:
+  kthread_delete(gyro_pid);
+unreg_accel:
+  sensor_unregister(&priv->accel.lower, devno);
+unreg_gyro:
+  sensor_unregister(&priv->gyro.lower, devno);
+del_accel_sem:
+  nxsem_destroy(&priv->accel.run);
+  nxsem_destroy(&priv->gyro.run);
+  nxmutex_destroy(&priv->devlock);
+  kmm_free(priv);
+  snerr("ERROR: Failed to register LSM6DS3TR-C driver: %d\n", err);
+  return err;
+}

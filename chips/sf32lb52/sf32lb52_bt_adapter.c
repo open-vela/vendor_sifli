@@ -408,14 +408,13 @@ static size_t sf32lb52_bt_tx_chunk_len(const uint8_t *data,
                                        size_t len,
                                        size_t offset)
 {
-  size_t remaining = len - offset;
-
-  if (offset == 0 && remaining > 1)
-    {
-      return 1;
-    }
-
-  return remaining;
+  /* Return the whole remaining frame as one chunk. The old code split
+     byte 0 from the body, which let the LCPU's H4 parser consume the type
+     byte before the body landed in the shared ring — the resulting D-cache
+     race on read_idx_mirror desynchronised the LCPU. Whole-frame atomic
+     writes eliminate the race. */
+  (void)data;
+  return len - offset;
 }
 
 static void sf32lb52_bt_rx_worker(FAR void *arg)

@@ -133,6 +133,13 @@ struct sf32lb52_bt_priv_s
   size_t rxlen;
   bool drop_rx_until_tx;
 };
+/* BTH4-VERBOSE: 0 = quiet (key events only), 1 = full HCI trace */
+static int bth4_verbose = 1;
+void bth4_set_verbose(int v) { bth4_verbose = v; }
+#define BTH4_LOG(fmt, ...) do { if (bth4_verbose) syslog(LOG_INFO, fmt, ##__VA_ARGS__); } while(0)
+#define BTH4_KEY(fmt, ...)  syslog(LOG_INFO, fmt, ##__VA_ARGS__)
+
+
 static int sf32lb52_bt_open(struct bt_driver_s *drv);
 static int sf32lb52_bt_send(struct bt_driver_s *drv,
                             enum bt_buf_type_e type,
@@ -174,7 +181,7 @@ static uint16_t sf32lb52_bt_ssp_handler(struct sf32lb52_bt_priv_s *priv,
       if (off + 3 + plen > (size_t)len) break;
       if (code == 0x31 && plen >= 6)  /* IO Capability Request */
         {
-          syslog(LOG_INFO, "bth4: SSP IO_CAP_REQ, reply DisplayYesNo\n");
+          BTH4_KEY("bth4: SSP IO_CAP_REQ, reply DisplayYesNo\n");
           uint8_t cmd[13];
           cmd[0] = H4_CMD;
           cmd[1] = 0x2b; cmd[2] = 0x04;  /* IO_Capability_Reply */
@@ -189,7 +196,7 @@ static uint16_t sf32lb52_bt_ssp_handler(struct sf32lb52_bt_priv_s *priv,
         }
       if (code == 0x33 && plen >= 10)  /* User Confirmation Request */
         {
-          syslog(LOG_INFO, "bth4: SSP USER_CONFIRM, auto-accept\n");
+          BTH4_KEY("bth4: SSP USER_CONFIRM, auto-accept\n");
           uint8_t cmd[10];
           cmd[0] = H4_CMD;
           cmd[1] = 0x2c; cmd[2] = 0x04;  /* User_Confirm_Reply */
@@ -199,18 +206,7 @@ static uint16_t sf32lb52_bt_ssp_handler(struct sf32lb52_bt_priv_s *priv,
           sf32lb52_bt_send(&priv->drv, BT_CMD, &cmd[1], 9);
           goto skip;
         }
-      if (code == 0x17 && plen >= 6)  /* Link Key Request */
-        {
-          syslog(LOG_INFO, "bth4: SSP LINK_KEY_REQ, negative reply (no key)\n");
-          uint8_t cmd[10];
-          cmd[0] = H4_CMD;
-          cmd[1] = 0x0c; cmd[2] = 0x04;  /* Link_Key_Request_Negative_Reply */
-          cmd[3] = 6;
-          memcpy(&cmd[4], &d[off+3], 6);
-          sf32lb52_bt_track_injected(priv, 0x040c);
-          sf32lb52_bt_send(&priv->drv, BT_CMD, &cmd[1], 9);
-          goto skip;
-        }
+/* KEY-FIX: LINK_KEY_REQUEST forwarded to zblue host (has the bond key) */
       off += 3 + plen;
       continue;
     skip:
@@ -346,7 +342,7 @@ static void sf32lb52_bt_swallow_completes(struct sf32lb52_bt_priv_s *priv,
           if (found)
             {
               uint16_t evt_len = 3 + d[off + 2];
-              syslog(LOG_INFO, "bth4: swallow %s 0x%04x\n",
+              BTH4_LOG("bth4: swallow %s 0x%04x\n",
                      d[off + 1] == 0x0E ? "CC" : "CS", cc_op);
               if (cc_op == 0x0c52 && d[off + 1] == 0x0E) s_eir_retry = 0;
               memmove(&d[off], &d[off + evt_len], len - off - evt_len);
@@ -360,11 +356,11 @@ static void sf32lb52_bt_swallow_completes(struct sf32lb52_bt_priv_s *priv,
               && d[off + 3] != 0x00)
             {
               uint16_t evt_len = 3 + d[off + 2];
-              syslog(LOG_INFO, "bth4: swallow orphan CS status=0x%02x\n", d[off + 3]);
+              BTH4_LOG("bth4: swallow orphan CS status=0x%02x\n", d[off + 3]);
               priv->pending_extra_count--;
               s_eir_retry++;
           if (s_eir_retry < 3) s_eir_dirty = 1;  /* EIR rejected — retry up to 3x */
-          else syslog(LOG_INFO, "bth4: EIR retry exhausted\n");
+          else BTH4_KEY("bth4: EIR retry exhausted\n");
               memmove(&d[off], &d[off + evt_len], len - off - evt_len);
               len -= evt_len;
               continue;
@@ -377,7 +373,7 @@ static void sf32lb52_bt_swallow_completes(struct sf32lb52_bt_priv_s *priv,
            * commands (e.g. EIR). zblue treats them as fatal and resets
            * the device, killing all subsequent commands. */
           uint16_t evt_len = 3 + d[off + 2];
-          syslog(LOG_INFO, "bth4: filter HW error evt\n");
+          BTH4_KEY("bth4: filter HW error evt\n");
           memmove(&d[off], &d[off + evt_len], len - off - evt_len);
           len -= evt_len;
           continue;
@@ -440,14 +436,14 @@ static void sf32lb52_bt_send_eir(struct sf32lb52_bt_priv_s *priv,
    * EIR field type 0x03 and stops advertising entirely. PANU service
    * advertisement belongs in SDP records, not EIR. */
   sf32lb52_bt_track_injected(priv, 0x0c52);
-  syslog(LOG_INFO, "bth4: send EIR name=%s len=%d\n", name, nlen);
+  BTH4_KEY("bth4: send EIR name=%s len=%d\n", name, nlen);
   sf32lb52_bt_send(&priv->drv, BT_CMD, ec, 3 + 241);
   /* s_eir_retry reset happens on CC success in swallow_completes */
 }
 static int sf32lb52_bt_forward_packet(struct sf32lb52_bt_priv_s *priv,
                                       uint8_t *data, size_t len)
 {
-  syslog(LOG_INFO, "bth4: fp len=%d b0=%02x\n", (int)len, len > 0 ? ((uint8_t*)data)[0] : 0);
+  BTH4_LOG("bth4: fp len=%d b0=%02x\n", (int)len, len > 0 ? ((uint8_t*)data)[0] : 0);
   enum bt_buf_type_e type;
   int ret;
   if (len <= H4_HEADER_SIZE)
@@ -486,7 +482,7 @@ static int sf32lb52_bt_forward_packet(struct sf32lb52_bt_priv_s *priv,
             if (off + 3 + plen > len) break;
             if (code == 0x08 && plen == 5)
               {
-                syslog(LOG_INFO, "bth4: enc-change raw %02x %02x %02x %02x %02x\n",
+                BTH4_KEY("bth4: enc-change raw %02x %02x %02x %02x %02x\n",
                        d[off+3], d[off+4], d[off+5], d[off+6], d[off+7]);
                 memmove(&d[off + 3], &d[off + 4], 4);
                 d[off + 2] = 4;
@@ -519,7 +515,7 @@ static int sf32lb52_bt_forward_packet(struct sf32lb52_bt_priv_s *priv,
             /* Only log SSP/auth/connection events (avoid BNEP data spam) */
             if (evt_code != 0x13)  /* skip only Number Of Completed Packets */
               {
-                syslog(LOG_INFO, "bth4: rx evt 0x%02x plen=%d b=%02x %02x %02x %02x\n",
+                BTH4_LOG("bth4: rx evt 0x%02x plen=%d b=%02x %02x %02x %02x\n",
                        evt_code, evt_plen,
                        oo+3<len?dd[oo+3]:0, oo+4<len?dd[oo+4]:0,
                        oo+5<len?dd[oo+5]:0, oo+6<len?dd[oo+6]:0);
@@ -548,7 +544,7 @@ static int sf32lb52_bt_forward_packet(struct sf32lb52_bt_priv_s *priv,
         if (dc[oc] == H4_EVT && dc[oc + 1] == 0x0F &&
             dc[oc + 5] == 0x05 && dc[oc + 6] == 0x04)
           {
-            syslog(LOG_INFO, "bth4: conn-create status=0x%02x num=%d\n",
+            BTH4_KEY("bth4: conn-create status=0x%02x num=%d\n",
                    dc[oc + 3], dc[oc + 4]);
           }
         if (dc[oc] == H4_EVT) { if (oc + 3 > (size_t)len) break; oc += 3 + dc[oc + 2]; }
@@ -560,16 +556,18 @@ static int sf32lb52_bt_forward_packet(struct sf32lb52_bt_priv_s *priv,
   if (len == 0) return 0;
   /* Send EIR when dirty flag is set (name updated or first boot).
    * Called from RX path, NOT from send (avoids recursive send). */
-  if (s_eir_dirty && !s_in_send)
+  if (s_eir_dirty)  /* s_in_send guard removed: permanently stuck at 1 */
     {
+      BTH4_KEY("bth4: EIR-SEND triggered name=%s\n", s_eir_name);
       s_eir_dirty = 0;
       sf32lb52_bt_send_eir(priv, s_eir_name);
     }
+
   ret = bt_netdev_receive(&priv->drv,
                           type,
                           (void *)&data[H4_HEADER_SIZE],
                           len - H4_HEADER_SIZE);
-  syslog(LOG_INFO, "bth4: netdev ret=%d\n", ret);
+  BTH4_LOG("bth4: netdev ret=%d\n", ret);
   if (ret < 0)
     {
       wlerr("Failed to receive HCI packet: %d\n", ret);
@@ -739,7 +737,7 @@ static struct sf32lb52_bt_priv_s g_sf32lb52_bt_priv =
 };
 static int sf32lb52_bt_recv_cb(uint8_t *data, uint16_t len)
 {
-  printf("bth4: recv_cb len=%d b0=%02x\n", (int)len, len > 0 ? data[0] : 0);
+  BTH4_LOG("bth4: recv_cb len=%d b0=%02x\n", (int)len, len > 0 ? data[0] : 0);
   struct sf32lb52_bt_priv_s *priv = &g_sf32lb52_bt_priv;
   ssize_t packet_len;
   int ret;
@@ -835,7 +833,7 @@ static int sf32lb52_bt_send(struct bt_driver_s *drv,
         {
           memcpy(s_eir_name, (const char *)data + 3, 248);
           s_eir_name[248] = '\0';
-          syslog(LOG_INFO, "bth4: save name for EIR: %s (no send)\n", s_eir_name);
+          BTH4_KEY("bth4: save name for EIR: %s (no send)\n", s_eir_name);
         }
       if (sf32lb52_bt_emulate_cmd(priv, opcode, &ret))
         {
@@ -857,11 +855,20 @@ static int sf32lb52_bt_send(struct bt_driver_s *drv,
     }
   if (type == BT_CMD && len >= sizeof(struct bt_hci_cmd_hdr_s))
     {
-      syslog(LOG_INFO, "bth4: fwd cmd 0x%04x\n", sf32lb52_bt_get_le16(data));
+      BTH4_LOG("bth4: fwd cmd 0x%04x\n", sf32lb52_bt_get_le16(data));
     }
   else if (type == BT_ACL_OUT)
     {
-      syslog(LOG_INFO, "bth4: fwd acl len=%d h=0x%04x\n", (int)len, len >= 3 ? ((uint8_t*)data)[1] | (((uint8_t*)data)[2] << 8) : 0);
+      BTH4_LOG("bth4: fwd acl len=%d h=0x%04x\n", (int)len, len >= 3 ? ((uint8_t*)data)[1] | (((uint8_t*)data)[2] << 8) : 0);
+      /* TEMP-SDP-DEBUG: dump ACL payload for SDP wire verification */
+      if (len >= 6) {
+          int dn = len < 80 ? (int)len : 80;
+          char hx[192];
+          int pp = 0;
+          for (int q = 0; q < dn && pp < (int)sizeof(hx) - 4; q++)
+              pp += snprintf(&hx[pp], sizeof(hx) - pp, "%02x", ((uint8_t*)data)[q]);
+          BTH4_LOG("bth4: aclhex %s\n", hx);
+      }
     }
   priv->drop_rx_until_tx = false;
     if (SF32LB52_BT_TRACE && type == BT_ACL_OUT)

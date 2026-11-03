@@ -1,2 +1,3 @@
-sleep 3
-vapp hap://app/com.netease.vela &
+sleep 2
+vapp hap://app/com.circle.home &
+btpand &

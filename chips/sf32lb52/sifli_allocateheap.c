@@ -44,7 +44,8 @@ extern void BSP_Board_PreInit(void);
 
 #define SRAM_START  0x20000000
 #define SRAM_SIZE   0x00080000    /* 512 KB */
-#define SRAM_END    (SRAM_START + SRAM_SIZE)
+#define SRAM_RESERVED_TOP 0x2007fb00 /* PAN-FIX: mailbox ring+custom cfg */
+#define SRAM_END SRAM_RESERVED_TOP
 
 /* PSRAM memory configuration for SF32LB52 (MPI1 SBUS) */
 
