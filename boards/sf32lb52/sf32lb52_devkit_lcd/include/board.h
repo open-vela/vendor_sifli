@@ -27,13 +27,23 @@
 
 /* Buttons
  *
- * This board exposes one user key on PA11 (Key2).
+ * Two user keys, both active high (their pads default to pull-down):
+ *   Key2 on PA11 -> bit 0
+ *   Key1 on PA34 -> bit 1
+ *
+ * Key1 doubles as the pin the ROM UART download path samples, so its pad
+ * configuration must stay at the reset default (see bsp_pinmux.c); reading
+ * it as GPIO input at runtime does not disturb that.  Pin assignment and
+ * active level match the xiaozhi-sf32 reference for this SoC family
+ * (CONFIG_BSP_KEY1_PIN=34, CONFIG_BSP_KEY1_ACTIVE_HIGH=y).
  */
 
 #define BUTTON_KEY2      0
-#define NUM_BUTTONS      1
+#define BUTTON_KEY1      1
+#define NUM_BUTTONS      2
 
 #define BUTTON_KEY2_BIT  (1 << BUTTON_KEY2)
+#define BUTTON_KEY1_BIT  (1 << BUTTON_KEY1)
 
 #endif /* __VENDOR_SIFLI_BOARDS_SF32LB52_DEVKIT_LCD_INCLUDE_BOARD_H */
 

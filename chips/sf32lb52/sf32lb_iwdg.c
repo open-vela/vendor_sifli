@@ -150,7 +150,7 @@ static int sf32lb_settimeout(FAR struct watchdog_lowerhalf_s *lower,
 {
   FAR struct sf32lb_watchdog_lowerhalf_s *priv =
     (FAR struct sf32lb_watchdog_lowerhalf_s *)lower;
-  int freq = 9000;
+  int freq = 32768;   /* 2026-11-01: 与 SiFli 52x 官方例程 LXT_FREQ 对齐（原 9000 疑致 20s 变 ~5.5s，待实测标定） */
 
   if (timeout == 0)
     {
@@ -244,7 +244,7 @@ static int sf32lb_getstatus(FAR struct watchdog_lowerhalf_s *lower,
 void sf32lb_iwdginitialize(FAR const char *devpath)
 {
   FAR struct sf32lb_watchdog_lowerhalf_s *priv = &g_iwdgdev;
-  int freq = 9000;
+  int freq = 32768;   /* 2026-11-01: 与 SiFli 52x 官方例程 LXT_FREQ 对齐（原 9000 疑致 20s 变 ~5.5s，待实测标定） */
 
   priv->ops = &g_wdgops;
   priv->started = false;

@@ -34,6 +34,9 @@
 #include <arch/board/board.h>
 
 #include "arm_internal.h"
+#ifdef CONFIG_ARM_MPU
+#  include "mpu.h"                /* BT HCI mailbox rings: non-cacheable MPU regions */
+#endif
 #include "system_bf0_ap.h"
 #include "bf0_hal.h"
 
@@ -149,6 +152,24 @@ const uintptr_t g_idle_topstack = HEAP_BASE;
  * Name: __sifli_start
  ****************************************************************************/
 
+static void early_puthex32(uint32_t v)
+{
+  static const char h[] = "0123456789ABCDEF";
+  int i;
+  for (i = 28; i >= 0; i -= 4)
+    {
+      arm_lowputc(h[(v >> i) & 0xF]);
+    }
+}
+
+static void early_puts(const char *s)
+{
+  while (*s)
+    {
+      arm_lowputc(*s++);
+    }
+}
+
 void __start(void)
 {
   uint32_t *dest;
@@ -160,6 +181,18 @@ void __start(void)
    * before NuttX interrupt system is ready.
    */
   __asm volatile ("cpsid i" : : : "memory");
+
+  /* v114b：复位原因可见化（AON 域常供电，复位后 WSR/CR 仍可读）。
+   * WSR：bit5=IWDT, bit1/2=WDT1/2, bit3/4=PIN, bit6=PWRKEY, bit7=LOWBAT。 */
+  {
+    uint32_t cr = hwp_pmuc->CR;
+    uint32_t wsr = hwp_pmuc->WSR;
+    early_puts("\r\n[RSET] CR=");
+    early_puthex32(cr);
+    early_puts(" WSR=");
+    early_puthex32(wsr);
+    early_puts("\r\n");
+  }
 
   /* Configure Vector Table Offset Register (VTOR) for Cortex-M33.
    * The vector table is located at the start of flash (0x12010000).
@@ -195,6 +228,33 @@ void __start(void)
     }
 
   arm_lowputc('A'); /* data segment init done */
+
+  /* BT HCI mailbox rings 走 MPU 非缓存 ------------------------------------
+   *
+   * 根因（docs_ble/30 §22 根因 2，真机 2026-10-25 重验）：
+   * struct circular_buf 里 read_idx_mirror(HCPU 写, 偏移 8..11) 与
+   * write_idx_mirror(LCPU 写, 偏移 12..15) 同一条 cache line。HCPU 发布
+   * 读指针后 up_clean_dcache() 会把本端缓存的**陈旧写指针**一起写回 →
+   * LCPU 的写指针回退 → 覆盖尚未 drain 的字节 → H4 失步（真机现象：
+   * 大流量时 drop invalid h4 上百条 → 网络挂 → 静默复位）。
+   *
+   * 已有一层缓解（sf32lb52_bt_adapter.c 里发布前重新 invalidate+重读），
+   * 只把窗口从 µs 缩到几条指令；这里从机制上根治：把两个 512B ring 配成
+   * MPU normal non-cacheable（0 RAM），HCPU 对 ring 的访问不再进 D-cache，
+   * 也就没有"写回陈旧写指针"这回事。MPU 其余地址由 PRIVDEFENA 走默认
+   * 内存映射（SRAM/PSRAM 可缓存，peripheral 走 device）。
+   */
+#ifdef CONFIG_ARM_MPU
+  mpu_control(false, false, false);        /* 配置前先保持 MPU 关闭 */
+  mpu_configure_region(0x2007fe00, 512,    /* HCPU->LCPU ring (MB CH1) */
+                       MPU_RBAR_AP_RWNO,
+                       MPU_RLAR_NONCACHEABLE | MPU_RLAR_PXN);
+  mpu_configure_region(0x20405c00, 512,    /* LCPU->HCPU ring (MB CH1) */
+                       MPU_RBAR_AP_RWNO,
+                       MPU_RLAR_NONCACHEABLE | MPU_RLAR_PXN);
+  mpu_control(true, false, true);          /* enable + PRIVDEFENA */
+  arm_lowputc('m');                        /* BT rings non-cacheable */
+#endif
 
 #ifdef CONFIG_ARMV8M_ICACHE
   up_enable_icache();

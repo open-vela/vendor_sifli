@@ -19,4 +19,22 @@ config TOUCH_IRQ_PIN
 		Driver GPIO pin id used by sifli_gpio_set_event().
 		PA31 is 31 on this board.
 
+config INPUT_FT6146_POLL_MS
+	int "Touch poll interval in milliseconds (0 to disable)"
+	default 0
+	---help---
+		Poll the controller every N milliseconds in addition to the edge
+		interrupt, for boards where the CTP interrupt pad cannot be used as
+		an edge source.  The driver collapses repeated states, so running
+		both sources produces no duplicate events.  Note that the panel does
+		not answer while idle -- each idle poll costs a full I2C timeout, so
+		leave this at 0 whenever the interrupt works.
+
+config INPUT_FT6146_TRACE
+	bool "Log touch samples to syslog"
+	default n
+	---help---
+		Print the chip id at init and one line per reported sample,
+		including the interrupt count.  Diagnostic use only.
+
 endif

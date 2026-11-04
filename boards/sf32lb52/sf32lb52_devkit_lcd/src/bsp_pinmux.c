@@ -214,7 +214,22 @@ static void BSP_PIN_Common(void)
 void BSP_PIN_Touch(void)
 {
     // Touch
-    HAL_PIN_Set(PAD_PA09, GPIO_A9,  PIN_NOPULL, 1);    // CTP_RESET
+    HAL_PIN_Set(PAD_PA09, GPIO_A9,  PIN_NOPULL, 1);    // CTP_RESET (output)
+    /* CTP_INT stays NOPULL.  Note that ft6146 arms a *falling* edge on this
+     * pin while the FT6146 INT is open-drain active-low, so the line ought to
+     * idle high -- and the GPIO_PULLUP that sifli_gpio_irq_enable() requests
+     * for falling-edge mode never reaches the pad, because HAL_GPIO_Init()
+     * ignores GPIO_InitTypeDef.Pull entirely (bf0_hal_gpio.c only asserts the
+     * value, then writes direction / open-drain / trigger registers).  That
+     * makes the edge marginal and is the most likely explanation for touch
+     * working on some boots and not others.
+     *
+     * Do NOT "fix" it by setting PIN_PULLUP here: tried in Round 23 and the
+     * board stopped producing any serial output at all, through a power cycle;
+     * reverting to NOPULL brought it straight back.  Mechanism unknown.  If
+     * this is revisited, look at a level-triggered interrupt or a low-rate
+     * re-arm watchdog instead of touching the pad pull.
+     */
     HAL_PIN_Set(PAD_PA31, GPIO_A31, PIN_NOPULL, 1);    // CTP_INT
     HAL_PIN_Set(PAD_PA30, I2C1_SCL, PIN_PULLUP, 1);
     HAL_PIN_Set(PAD_PA33, I2C1_SDA, PIN_PULLUP, 1);

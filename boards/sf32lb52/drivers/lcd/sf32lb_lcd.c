@@ -32,6 +32,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <debug.h>
+#include <syslog.h>
 
 #include <nuttx/arch.h>
 #include <nuttx/board.h>
@@ -86,6 +87,7 @@ struct sf32lb_lcd_dev_s
 
     int power;
     uint8_t bpp;
+    int contrast;          /* 0..CONFIG_LCD_MAXCONTRAST，供 getcontrast 返回 */
 };
 
 /* Configuration ************************************************************/
@@ -113,6 +115,17 @@ static void sf32lb_lcd_ensure_display_on(FAR struct sf32lb_lcd_dev_s *dev)
     {
       dev->p_drv_ops->p_ops->DisplayOn(&dev->hlcdc);
       dev->power = CONFIG_LCD_MAXPOWER;
+
+      /* 2026-10-30: 显式写亮度 100%, 不依赖面板出厂默认值。 */
+      if (dev->p_drv_ops->p_ops->SetBrightness != NULL)
+        {
+          dev->p_drv_ops->p_ops->SetBrightness(&dev->hlcdc, 100);
+        }
+
+      /* 亮度初始给满。这里是"驱动起来时面板实际是什么亮度"的唯一记录，
+       * 不设的话 getcontrast 会返回 0（全黑），而实际上面板是出厂默认亮度 ——
+       * 界面上的滑块第一次拉的时候会从 0 跳到某个值，很难看。 */
+      dev->contrast = CONFIG_LCD_MAXCONTRAST;
     }
 }
 
@@ -650,6 +663,14 @@ static int sf32lb_lcd_setpower(FAR struct lcd_dev_s *dev, int power)
           priv->p_drv_ops->p_ops->DisplayOn(&priv->hlcdc);
         }
 
+      /* 2026-10-30: ioctl(SETPOWER,1)(P17b) 也显式写满亮度。 */
+      if (priv->p_drv_ops->p_ops->SetBrightness != NULL)
+        {
+          priv->p_drv_ops->p_ops->SetBrightness(&priv->hlcdc, 100);
+        }
+
+      priv->contrast = CONFIG_LCD_MAXCONTRAST;
+
       /* Save the power */
 
       priv->power = power;
@@ -682,8 +703,9 @@ static int sf32lb_lcd_setpower(FAR struct lcd_dev_s *dev, int power)
 
 static int sf32lb_lcd_getcontrast(FAR struct lcd_dev_s *dev)
 {
-  lcdinfo("Not implemented\n");
-  return -ENOSYS;
+  FAR struct sf32lb_lcd_dev_s *priv = (FAR struct sf32lb_lcd_dev_s *)dev;
+
+  return priv->contrast;
 }
 
 /****************************************************************************
@@ -694,10 +716,37 @@ static int sf32lb_lcd_getcontrast(FAR struct lcd_dev_s *dev)
  *
  ****************************************************************************/
 
+/* ★ 亮度：把标准 NuttX 的 setcontrast 接到面板驱动里那个**一直没人调用**的
+ * LCD_SetBrightness() 上（co5300.c:544，写 DCS 0x51）。
+ *
+ * 之前这里是直接 return -ENOSYS，所以：
+ *   - 应用层 ioctl(LCDDEVIO_SETCONTRAST) 必然失败
+ *   - co5300.c 里的 LCD_SetBrightness 定义了、注册进 ops 表了，但零调用者
+ * 面板亮度只能靠出厂默认值，用户改不了。
+ *
+ * 量程换算：NuttX 的 contrast 是 0..CONFIG_LCD_MAXCONTRAST（本板 = 63），
+ * 而 LCD_SetBrightness 要的是 0..100 的百分比。 */
 static int sf32lb_lcd_setcontrast(FAR struct lcd_dev_s *dev,
                               unsigned int contrast)
 {
-  lcdinfo("contrast: %d\n", contrast);
+  FAR struct sf32lb_lcd_dev_s *priv = (FAR struct sf32lb_lcd_dev_s *)dev;
+  uint8_t percent;
+
+  if (contrast > CONFIG_LCD_MAXCONTRAST)
+    {
+      contrast = CONFIG_LCD_MAXCONTRAST;
+    }
+
+  percent = (uint8_t)((contrast * 100u) / CONFIG_LCD_MAXCONTRAST);
+
+  if (priv->p_drv_ops && priv->p_drv_ops->p_ops &&
+      priv->p_drv_ops->p_ops->SetBrightness)
+    {
+      priv->p_drv_ops->p_ops->SetBrightness(&priv->hlcdc, percent);
+      priv->contrast = (int)contrast;
+      return OK;
+    }
+
   return -ENOSYS;
 }
 
@@ -775,6 +824,8 @@ static int lcd_hw_setup_thread_entry(int argc, FAR char *argv[])
     return OK;
 }
 
+extern void BSP_PIN_LCD(void);   /* 板级 pinmux: PA37(VADD_EN)/LCD_RESET 配成输出 */
+
 static int lcd_init_thread_entry(int argc, FAR char *argv[])
 {
 	lcd_drv_desc_t *p_drv_ops;
@@ -783,7 +834,27 @@ static int lcd_init_thread_entry(int argc, FAR char *argv[])
   bool lcd_registered = false;
   int retry;
 
+  /* 每一次（重新）启动都先给面板来一次真实的掉电-上电循环。
+   *
+   * 真机反复出现的现象：系统/UI 一切正常（alive 心跳、lcd_flush fail=0），
+   * 但屏幕是黑的；只有拔插 USB（真断电）才恢复。软复位（RESET 键、看门狗、
+   * 崩溃重启、烧录收尾）都不会让 AMOLED 面板真正掉电，VADD/面板内部状态
+   * 残留，后面这条初始化序列跑不出干净的 POR 状态。
+   *
+   * 关键顺序：必须先 BSP_PIN_LCD() 把 PA37(VADD_EN)/LCD_RESET 的 pinmux
+   * 配成 GPIO 输出，再拉低。软复位后引脚默认是输入态，不先配置就"拉低"，
+   * 电平根本不变 —— v67 只调了 PowerDown() 没做 pinmux，所以刷机/软复位
+   * 后仍然黑屏（2026-10-26 20:59 复现）。 */
+  BSP_PIN_LCD();
+  BSP_LCD_PowerDown();
+  /* 2026-10-30: 300ms 在异常复位后不足以保证面板真正 POR(实测:
+   * 软复位/看门狗后黑屏, 运行时用 lcdtool reinit 掉电 1.5s 可恢复),
+   * 因此开机统一给 1500ms。 */
+  usleep(1500 * 1000);
+
 	BSP_LCD_PowerUp();
+
+  lcdinfo("panel power-cycle done (pinmux forced, VADD off 300ms)");
 	
 	p_drv_ops = find_right_driver();
 
@@ -837,6 +908,13 @@ static int lcd_init_thread_entry(int argc, FAR char *argv[])
 	if (p_drv_ops && p_drv_ops->p_ops && p_drv_ops->p_ops->Init)
 	{
 		p_drv_ops->p_ops->Init(&s_drv_lcd.hlcdc);
+
+    /* 2026-10-30: Init 完成后显式给满亮度。 */
+    if (p_drv_ops->p_ops->SetBrightness)
+      {
+        p_drv_ops->p_ops->SetBrightness(&s_drv_lcd.hlcdc, 100);
+      }
+    s_drv_lcd.contrast = CONFIG_LCD_MAXCONTRAST;
 	}
 
 	s_drv_lcd.p_drv_ops = p_drv_ops; 
@@ -1004,3 +1082,53 @@ void board_lcd_uninitialize(void)
 
 }
 
+
+/****************************************************************************
+ * Name: sf32lb_lcd_readid
+ *
+ * 2026-10-30 黑屏排查: 读面板 ID (CO5300 期望 0x530001 / 0x331100)。
+ * 返回 0xffffffff 表示没有可用驱动/不支持读 ID。
+ ****************************************************************************/
+
+uint32_t sf32lb_lcd_readid(void)
+{
+  if (s_drv_lcd.p_drv_ops != NULL && s_drv_lcd.p_drv_ops->p_ops != NULL &&
+      s_drv_lcd.p_drv_ops->p_ops->ReadID != NULL)
+    {
+      return s_drv_lcd.p_drv_ops->p_ops->ReadID(&s_drv_lcd.hlcdc);
+    }
+
+  return 0xffffffffu;
+}
+
+/****************************************************************************
+ * Name: sf32lb_lcd_hw_reinit
+ *
+ * 2026-10-30 黑屏排查: 运行时强制给面板一次更长的掉电-上电循环(1.5s),
+ * 然后重跑面板 Init + DisplayOn。用于区分 "面板能恢复" 与 "面板/排线硬件问题"。
+ ****************************************************************************/
+
+int sf32lb_lcd_hw_reinit(void)
+{
+  syslog(LOG_INFO, "[lcd_reinit] start: force pinmux + VADD off 1500ms\n");
+
+  BSP_PIN_LCD();
+  BSP_LCD_PowerDown();
+  usleep(1500 * 1000);
+  BSP_LCD_PowerUp();
+  usleep(100 * 1000);
+
+  if (s_drv_lcd.p_drv_ops != NULL && s_drv_lcd.p_drv_ops->p_ops != NULL &&
+      s_drv_lcd.p_drv_ops->p_ops->Init != NULL)
+    {
+      s_drv_lcd.p_drv_ops->p_ops->Init(&s_drv_lcd.hlcdc);
+    }
+
+  s_drv_lcd.power = 0;
+  sf32lb_lcd_ensure_display_on(&s_drv_lcd);
+  s_drv_lcd.contrast = CONFIG_LCD_MAXCONTRAST;
+
+  syslog(LOG_INFO, "[lcd_reinit] done: readid=0x%08x power=%d contrast=%d\n",
+         (unsigned)sf32lb_lcd_readid(), s_drv_lcd.power, s_drv_lcd.contrast);
+  return 0;
+}

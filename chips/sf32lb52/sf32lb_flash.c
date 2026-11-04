@@ -78,13 +78,17 @@ static bool g_flash_hw_initialized;
  ****************************************************************************/
 
 static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void);
+static void SF32LB_FLASH_RAMFUNC sf32lb_flash_spin_us(uint32_t us);
+static void SF32LB_FLASH_RAMFUNC
+sf32lb_flash_reset_to_qmode(FAR FLASH_HandleTypeDef *hflash);
 static int sf32lb_nor_sync_geometry(FAR struct sf32lb_nor_dev_s *priv,
                                     bool allow_offset_fallback);
 static bool sf32lb_flash_verify_erased(uint32_t addr, uint32_t size);
 static bool sf32lb_flash_verify_written(uint32_t addr,
                                         FAR const uint8_t *buffer,
                                         uint32_t size);
-static void sf32lb_flash_restore_ahb_read(FAR FLASH_HandleTypeDef *hflash);
+static void SF32LB_FLASH_RAMFUNC
+sf32lb_flash_restore_ahb_read(FAR FLASH_HandleTypeDef *hflash);
 static bool sf32lb_flash_is_xip_buffer(FAR const uint8_t *buffer,
                                        uint32_t size);
 static int SF32LB_FLASH_RAMFUNC
@@ -178,6 +182,47 @@ static int sf32lb_flash_hw_init(void)
   return -EIO;
 }
 
+static void SF32LB_FLASH_RAMFUNC sf32lb_flash_spin_us(uint32_t us)
+{
+  /* Delay helper for windows where the NOR chip cannot serve reads, so
+   * HAL_Delay_us() (linked into XIP flash) must not be used.  Loop body is
+   * RAM resident and the counter lives on the stack.  Sized for the fastest
+   * HCPU clock with a wide margin: it only ever waits longer than asked.
+   */
+
+  volatile uint32_t loops = us * 100U + 1U;
+
+  while (loops--)
+    {
+      __asm__ volatile ("nop");
+      __asm__ volatile ("nop");
+      __asm__ volatile ("nop");
+      __asm__ volatile ("nop");
+    }
+}
+
+static void SF32LB_FLASH_RAMFUNC
+sf32lb_flash_reset_to_qmode(FAR FLASH_HandleTypeDef *hflash)
+{
+  /* Software-reset the NOR chip, then put the controller back into quad mode.
+   *
+   * From the RST opcode until the quad-mode restore the chip is unresponsive
+   * for up to tRST, so nothing in this window may fetch instructions or read
+   * data from XIP flash: the delay helper, the HAL entry points and
+   * hflash->ctable all have to be in SRAM already.  The caller must also keep
+   * interrupts disabled -- an ISR vectoring into XIP flash faults the same
+   * way, which is what made the failure look intermittent (it survived only
+   * when the code it needed happened to still be in I-cache).
+   */
+
+  HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RST_EN, 0);
+  HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RST, 0);
+  sf32lb_flash_spin_us(30);
+
+  hflash->Mode = HAL_FLASH_QMODE;
+  HAL_FLASH_SET_QUAL_SPI(hflash, true);
+}
+
 static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void)
 {
   FAR FLASH_HandleTypeDef *hflash;
@@ -191,6 +236,7 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void)
     }
 
   hflash = &g_spi_nor_flash_ctx.handle;
+
 
   memset(&g_spi_nor_flash_ctx, 0, sizeof(g_spi_nor_flash_ctx));
   memset(&g_spi_nor_flash_dma_handle, 0, sizeof(g_spi_nor_flash_dma_handle));
@@ -227,18 +273,16 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void)
          sizeof(g_spi_nor_cmd_table_cache));
   hflash->ctable = &g_spi_nor_cmd_table_cache;
 
-  /* Exit potential vendor continuous-read state before write/erase. */
-
-  HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RST_EN, 0);
-  HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RST, 0);
-  HAL_Delay_us(30);
-
-  /* Board flash2 uses 4-line SPI in normal runtime (line=2 in board init).
-   * HAL_FLASH_PreInit forces Mode=0; restore quad mode explicitly.
+  /* Exit potential vendor continuous-read state before write/erase.
+   *
+   * HAL_FLASH_PreInit() left the AHB read command on FREAD, so plain XIP
+   * fetches still work up to this point; the chip reset below is what makes
+   * flash unreadable, hence the RAM resident helper under a hard IRQ lock.
    */
 
-  hflash->Mode = HAL_FLASH_QMODE;
-  HAL_FLASH_SET_QUAL_SPI(hflash, true);
+  flags = up_irq_save();
+  sf32lb_flash_reset_to_qmode(hflash);
+  up_irq_restore(flags);
 
   /* HAL_FLASH_PreInit sets hflash->dma = NULL but HAL_QSPIEX_WRITE_PAGE
    * requires DMA for reliable page-program operations.  Configure DMA
@@ -273,7 +317,10 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void)
 
   /* Ensure NOR is writable -- clear status register protection bits. */
 
+  flags = up_irq_save();
   HAL_FLASH_CLR_PROTECT(hflash);
+  up_irq_restore(flags);
+
   sf32lb_flash_try_global_unlock(hflash);
 
   detected_size = hflash->size;
@@ -469,7 +516,8 @@ static bool sf32lb_flash_verify_written(uint32_t addr,
   return true;
 }
 
-static void sf32lb_flash_restore_ahb_read(FAR FLASH_HandleTypeDef *hflash)
+static void SF32LB_FLASH_RAMFUNC
+sf32lb_flash_restore_ahb_read(FAR FLASH_HandleTypeDef *hflash)
 {
   bool qmode;
 
@@ -523,6 +571,17 @@ sf32lb_flash_try_global_unlock(FAR FLASH_HandleTypeDef *hflash)
 
   HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_WREN, 0);
   (void)sf32lb_flash_issue_raw_cmd(hflash, 0x98); /* ULBPR/global unlock */
+
+  /* ★ 2026-10-24: HAL_FLASH_MANUAL_CMD() 把 QSPI 切到 manual 模式后不会自己
+   * 切回来, 而 sf32lb_flash_unlock() 是 XIP 代码。manual 模式下 AHB 读失效,
+   * 下一条取指就从读不出内容的 flash 拿 -> HardFault(任务 AppBringUp,
+   * 崩在 boot 时 nx_mount("/dev/config0") 首次访问 NOR)。
+   * 所以必须在这里、放开中断之前把 AHB 读恢复, 让后面的 XIP 调用安全。
+   * 另外留一点时间给芯片完成 0x98 的内部写(tW), 免得恢复后读到忙状态。
+   */
+
+  sf32lb_flash_spin_us(200);
+  sf32lb_flash_restore_ahb_read(hflash);
 
   up_irq_restore(flags);
   sf32lb_flash_unlock();
@@ -656,6 +715,7 @@ static int sf32lb_nor_prepare_io(FAR struct sf32lb_nor_dev_s *priv,
   uint64_t part_size;
   int ret;
 
+
   if (priv == NULL || priv->spi_flash_handle == NULL)
     {
       return -EINVAL;
@@ -668,6 +728,7 @@ static int sf32lb_nor_prepare_io(FAR struct sf32lb_nor_dev_s *priv,
         {
           return ret;
         }
+
     }
 
   ret = sf32lb_nor_sync_geometry(priv, true);
@@ -675,6 +736,7 @@ static int sf32lb_nor_prepare_io(FAR struct sf32lb_nor_dev_s *priv,
     {
       return ret;
     }
+
 
   part_size = (uint64_t)priv->nsectors * SF32LB_NOR_PAGE_SIZE;
   if (((uint64_t)offset + (uint64_t)nbytes) > part_size)
@@ -1063,6 +1125,7 @@ static ssize_t sf32lb_nor_read(FAR struct mtd_dev_s *dev, off_t offset,
 {
   FAR struct sf32lb_nor_dev_s *priv = (FAR struct sf32lb_nor_dev_s *)dev;
   int ret;
+
 
   if (offset < 0)
     {
