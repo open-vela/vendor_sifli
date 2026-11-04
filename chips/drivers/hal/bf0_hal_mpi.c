@@ -22,10 +22,90 @@
 
 #include "flash_table.h"
 
+
+
 #if defined(SF32LB52X)
 #  undef __HAL_ROM_USED
 #  define __HAL_ROM_USED HAL_SECTION(".ramfunc")
 #endif
+
+/* ── V142-FIX: NOR 忙轮询超时（IRQ 关断期间的兜底）──────────────────
+ * sf32lb_flash.c 在 up_irq_save() 里调用本 HAL 的写/擦除/命令等待。
+ * 原实现的状态轮询（HAL_FLASH_IS_CMD_DONE / HAL_FLASH_STATUS_MATCH /
+ * HAL_FLASH_IS_PROG_DONE）没有任何超时；flash 进入坏状态时会无限等下去，
+ * 且中断是关的 → 整机冻结，20s 后硬件看门狗复位（无 dump）。
+ * 这里用 DWT 周期计数器（不依赖中断，IRQ 关断时仍计数）实现 deadline：
+ * 超时只置"命中"标志并让 HAL 返回错误，由 sf32lb_flash.c 负责恢复 IRQ /
+ * AHB 读、打日志并返回 -EIO。正常路径只多几次寄存器读，不改变时序。
+ */
+#define HAL_FLASH_TIMEOUT_GUARD_MAX 50000000u
+
+static volatile uint32_t g_flash_timeout_start;
+static volatile uint32_t g_flash_timeout_span;
+static volatile uint32_t g_flash_timeout_loops;
+static volatile uint8_t  g_flash_timeout_armed;
+static volatile uint8_t  g_flash_timeout_hit;
+
+__HAL_ROM_USED void HAL_FLASH_TimeoutArm(uint32_t timeout_ms)
+{
+    g_flash_timeout_hit   = 0;
+    g_flash_timeout_loops = 0;
+    g_flash_timeout_span  = 0;
+    g_flash_timeout_armed = 0;
+
+    if (timeout_ms == 0 || SystemCoreClock == 0)
+    {
+        return;
+    }
+
+    if ((CoreDebug->DEMCR & CoreDebug_DEMCR_TRCENA_Msk) == 0)
+    {
+        CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    }
+    if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0)
+    {
+        DWT->CYCCNT = 0;
+        DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    }
+
+    g_flash_timeout_start = DWT->CYCCNT;
+    g_flash_timeout_span  = (SystemCoreClock / 1000u) * timeout_ms;
+    g_flash_timeout_armed = 1;
+}
+
+__HAL_ROM_USED void HAL_FLASH_TimeoutDisarm(void)
+{
+    g_flash_timeout_armed = 0;
+}
+
+__HAL_ROM_USED int HAL_FLASH_TimeoutHit(void)
+{
+    return (int)g_flash_timeout_hit;
+}
+
+__HAL_ROM_USED int HAL_FLASH_TimeoutCheck(void)
+{
+    if (g_flash_timeout_armed == 0)
+    {
+        return 0;
+    }
+    if (g_flash_timeout_hit != 0)
+    {
+        return 1;
+    }
+    if (++g_flash_timeout_loops > HAL_FLASH_TIMEOUT_GUARD_MAX)
+    {
+        g_flash_timeout_hit = 1;
+        return 1;
+    }
+    if (g_flash_timeout_span != 0 &&
+        (uint32_t)(DWT->CYCCNT - g_flash_timeout_start) > g_flash_timeout_span)
+    {
+        g_flash_timeout_hit = 1;
+        return 1;
+    }
+    return 0;
+}
 
 __HAL_ROM_USED HAL_StatusTypeDef HAL_QSPI_Init(FLASH_HandleTypeDef *hflash, qspi_configure_t *cfg)
 {
@@ -220,7 +300,13 @@ __HAL_ROM_USED HAL_StatusTypeDef HAL_FLASH_SET_CMD(FLASH_HandleTypeDef *hflash, 
     }
     hflash->Instance->CMDR1 = cmd & 0XFF;
 
-    while (!HAL_FLASH_IS_CMD_DONE(hflash));
+    while (!HAL_FLASH_IS_CMD_DONE(hflash))
+    {
+        if (HAL_FLASH_TimeoutCheck())
+        {
+            return HAL_ERROR;
+        }
+    }
     HAL_FLASH_CLR_CMD_DONE(hflash);
 
     if (hflash->cs_ctrl)
@@ -1048,7 +1134,13 @@ __HAL_ROM_USED int HAL_FLASH_ISSUE_CMD_SEQ(FLASH_HandleTypeDef *handle, SPI_FLAS
 
     // wait command 2 done
     //while (HAL_FLASH_IS_BUSY(handle));
-    while (!HAL_FLASH_STATUS_MATCH(handle));
+    while (!HAL_FLASH_STATUS_MATCH(handle))
+    {
+        if (HAL_FLASH_TimeoutCheck())
+        {
+            break;
+        }
+    }
 
     HAL_FLASH_CLR_STATUS(handle, MPI_SCR_SMFC | MPI_SCR_TCFC);
 
@@ -1121,6 +1213,11 @@ __HAL_ROM_USED void nor_qspi_switch(FLASH_HandleTypeDef *hflash, bool en)
             {
                 HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RDSR, 0);
                 res = HAL_FLASH_IS_PROG_DONE(hflash);
+                if (HAL_FLASH_TimeoutCheck())
+                {
+                    break;
+                }
+
             }
             while (!res);
         }
@@ -1208,6 +1305,11 @@ __HAL_ROM_USED void nor_qspi_switch(FLASH_HandleTypeDef *hflash, bool en)
             {
                 HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RDSR, 0);
                 res = HAL_FLASH_IS_PROG_DONE(hflash);
+                if (HAL_FLASH_TimeoutCheck())
+                {
+                    break;
+                }
+
             }
             while (!res);
         }
@@ -1334,6 +1436,11 @@ __HAL_ROM_USED void HAL_FLASH_CLR_PROTECT(FLASH_HandleTypeDef *hflash)
             {
                 HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RDSR, 0);
                 res = HAL_FLASH_IS_PROG_DONE(hflash);
+                if (HAL_FLASH_TimeoutCheck())
+                {
+                    break;
+                }
+
             }
             while (!res);
         }
@@ -1378,6 +1485,11 @@ __HAL_ROM_USED void HAL_FLASH_CLR_PROTECT(FLASH_HandleTypeDef *hflash)
             {
                 HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RDSR, 0);
                 res = HAL_FLASH_IS_PROG_DONE(hflash);
+                if (HAL_FLASH_TimeoutCheck())
+                {
+                    break;
+                }
+
             }
             while (!res);
         }
@@ -1499,6 +1611,11 @@ __HAL_ROM_USED int HAL_QSPI_LOCK_OTP(FLASH_HandleTypeDef *hflash, uint32_t addr)
         {
             HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RDSR, 0);
             res = HAL_FLASH_IS_PROG_DONE(hflash);
+            if (HAL_FLASH_TimeoutCheck())
+            {
+                break;
+            }
+
         }
         while (!res);
     }
@@ -1527,6 +1644,11 @@ __HAL_ROM_USED int HAL_QSPI_LOCK_OTP(FLASH_HandleTypeDef *hflash, uint32_t addr)
         {
             HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RDSR, 0);
             res = HAL_FLASH_IS_PROG_DONE(hflash);
+            if (HAL_FLASH_TimeoutCheck())
+            {
+                break;
+            }
+
         }
         while (!res);
     }

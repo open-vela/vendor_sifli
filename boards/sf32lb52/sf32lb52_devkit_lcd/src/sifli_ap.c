@@ -24,6 +24,7 @@
 // specify chip arch internal header
 // eg: arm_internal.h riscv_internal.h
 #include <nuttx/config.h>
+#include <nuttx/usb/rndis.h>
 
 #include <syslog.h>
 #include <errno.h>
@@ -48,6 +49,16 @@
 #include <nuttx/timers/pwm.h>
 #include <nuttx/timers/timer.h>
 #include <nuttx/video/fb.h>
+
+#if defined(CONFIG_SENSORS_MPU60X0)
+#  include <nuttx/sensors/mpu60x0.h>
+#endif
+
+/* 观察用：HAL_PIN_Set 的返回值。
+ * 板级这段在控制台就绪之前执行，syslog 的输出会丢，所以另存一份全局，
+ * 由 imu 命令在启动完成后打印出来。-1 表示 pad/function 组合被拒绝。 */
+int g_imu_pinmux_scl = -99;
+int g_imu_pinmux_sda = -99;
 #if defined(CONFIG_I2C) && defined(CONFIG_SENSORS_LSM6DSL)
 #  include <nuttx/sensors/lsm6dsl.h>
 #endif
@@ -62,6 +73,10 @@
 #if defined(CONFIG_SPI) && defined(CONFIG_MMCSD_SPI) && \
   defined(CONFIG_BSP_USING_SPI1)
 #  include <nuttx/mmcsd.h>
+#  ifdef CONFIG_PTABLE_PARTITION
+#    include <nuttx/fs/fs.h>          /* register_blockpartition */
+#    include <nuttx/fs/partition.h>   /* parse_block_partition */
+#  endif
 #endif
 
 #ifdef CONFIG_ADC
@@ -70,6 +85,10 @@ extern int sf32lb_adc_init(const char *devpath);
 
 #ifdef CONFIG_CDCACM
 #  include <nuttx/usb/cdcacm.h>
+#endif
+
+#ifdef CONFIG_RNDIS
+#  include <nuttx/usb/rndis.h>
 #endif
 
 #ifdef CONFIG_MTD
@@ -98,7 +117,15 @@ extern int sf32lb_nor_automount(int minor, int block_offset, int block_count);
 #  define SF32LB52_TFCARD_SPI_PORT     0
 #  define SF32LB52_TFCARD_SLOT         0
 #  define SF32LB52_TFCARD_MINOR        0
-#  define SF32LB52_TFCARD_MOUNTPOINT   "/data/tf"
+/* 挂载点必须在 /data 之外。
+ * 原来的 "/data/tf" 有个致命顺序问题：board_late_initialize 先给 /data 挂
+ * tmpfs 并把 TF 卡挂到 /data/tf，之后又要
+ *     nx_umount2("/data", 0);
+ *     nx_mount("/dev/config0", "/data", "littlefs", ...);
+ * 把 /data 换成 littlefs —— 那次 umount 会把这个挂载点整个带走，
+ * 于是 TF 卡就算挂成功了也会在下一条语句消失。
+ * /mnt/tf 不在 /data 子树里，换 /data 不影响它。 */
+#  define SF32LB52_TFCARD_MOUNTPOINT   "/mnt/tf"
 #endif
 
 #if defined(CONFIG_RTC) && defined(CONFIG_RTC_DRIVER)
@@ -161,17 +188,70 @@ static int sf32lb52_spi1_register_char(void)
 #endif
 
 #if defined(CONFIG_MMCSD_SPI)
+#ifdef CONFIG_PTABLE_PARTITION
+/* 对分区表里的每个分区注册一个块设备 /dev/mmcsd0p<index>。
+ * MBR 解析器从 index 0 开始，所以第一个分区正是 mount 代码优先尝试的
+ * /dev/mmcsd0p0。 */
+static void sf32lb52_tfcard_partition_handler(
+    FAR struct partition_s *part, FAR void *arg)
+{
+  char devname[32];
+  int pret;
+
+  snprintf(devname, sizeof(devname), "/dev/mmcsd0p%u",
+           (unsigned)part->index);
+
+  pret = register_blockpartition(devname, 0, "/dev/mmcsd0",
+                                 part->firstblock, part->nblocks);
+
+  /* NOTE: 这里一律用 syslog(), 不用 serr()/sinfo() —— 那些宏取决于
+   * CONFIG_DEBUG_ERROR/DEBUG_INFO, 本板未开启, 展开成 _none 后**什么都不打印**
+   * (实测: 目标文件里连字符串都没有)。排查 TF 卡时正是被这一点蒙住:
+   * 初始化一直失败, 但串口上一条消息都看不到。 */
+  syslog(LOG_INFO, "INFO: TF partition %s first=%zu n=%zu -> %d\n",
+         devname, (size_t)part->firstblock, (size_t)part->nblocks, pret);
+
+  if (pret >= 0 && arg != NULL)
+    {
+      (*(int *)arg)++;
+    }
+}
+#endif
+
 static int sf32lb52_tfcard_mount(void)
 {
 #ifndef CONFIG_DISABLE_MOUNTPOINT
+  /* 设备 x 文件系统 的组合都试一遍。
+   *
+   * 为什么需要两种文件系统名：树里有两套互不相干的 FAT 驱动，而且能力不同：
+   *   "vfat"  -> nuttx/fs/fat   (NuttX 原生, 只认 FAT12/16/32)
+   *   "fatfs" -> nuttx/fs/fatfs (ChaN FatFs, ffconf.h 里 FF_FS_EXFAT=1)
+   * 现在市面上买的卡出厂基本都是 exFAT，用 "vfat" 挂只会得到 -EINVAL，
+   * 而且错误码完全看不出"其实是文件系统不匹配"。所以两个都试。 */
   static const char *const devpaths[] =
   {
     "/dev/mmcsd0p0",
     "/dev/mmcsd0"
   };
+  static const char *const fstypes[] =
+  {
+    "vfat",      /* FAT12/16/32 */
+    "fatfs"      /* 含 exFAT */
+  };
   int tmpret;
   int ret = -ENODEV;
   size_t i;
+  size_t f;
+
+  /* mkdir 不会递归建目录，父目录不存在时它会返回 ENOENT，
+   * 而 nx_mount 到不存在的目录上只会给一个 -ENOTDIR(-20) —— 完全看不出
+   * 真正原因是"父目录没建"。所以先显式把 /mnt 建出来。 */
+  tmpret = mkdir("/mnt", 0755);
+  if (tmpret < 0 && errno != EEXIST)
+    {
+      serr("WARN: mkdir /mnt failed: %d\n", errno);
+      return -errno;
+    }
 
   tmpret = mkdir(SF32LB52_TFCARD_MOUNTPOINT, 0755);
   if (tmpret < 0 && errno != EEXIST)
@@ -182,12 +262,17 @@ static int sf32lb52_tfcard_mount(void)
 
   for (i = 0; i < sizeof(devpaths) / sizeof(devpaths[0]); i++)
     {
-      ret = nx_mount(devpaths[i], SF32LB52_TFCARD_MOUNTPOINT, "vfat", 0, NULL);
-      if (ret >= 0 || ret == -EBUSY)
+      for (f = 0; f < sizeof(fstypes) / sizeof(fstypes[0]); f++)
         {
-          syslog(LOG_INFO, "INFO: TF mounted from %s to %s\n",
-                 devpaths[i], SF32LB52_TFCARD_MOUNTPOINT);
-          return OK;
+          ret = nx_mount(devpaths[i], SF32LB52_TFCARD_MOUNTPOINT,
+                         fstypes[f], 0, NULL);
+          if (ret >= 0 || ret == -EBUSY)
+            {
+              syslog(LOG_INFO,
+                     "INFO: TF mounted: %s as %s on %s\n",
+                     devpaths[i], fstypes[f], SF32LB52_TFCARD_MOUNTPOINT);
+              return OK;
+            }
         }
     }
 
@@ -219,11 +304,47 @@ static int sf32lb52_tfcard_initialize(void)
       return ret;
     }
 
+#ifdef CONFIG_PTABLE_PARTITION
+  /* Register the partitions found on the card as /dev/mmcsd0pN.
+   *
+   * 实测 (2026-10-18): 只调 mmcsd_spislotinitialize() 时 NuttX 仅创建整盘设备
+   * /dev/mmcsd0，**不会**解析分区表 —— 上游 mmcsd 驱动本身不调用
+   * parse_block_partition()，全树只有 risc-v/mpfs 那块板子在板级显式调用。
+   * 于是带 MBR 分区的 TF 卡（FAT 在分区 1 里）挂不上：
+   *   mount -t vfat /dev/mmcsd0 /data/tf  ->  errno 20 (ENOTDIR)
+   * fs_partition.c 虽然编译了，也因无人引用被 --gc-sections 回收。
+   *
+   * 补上这一步之后，下面的 sf32lb52_tfcard_mount() 会优先用 /dev/mmcsd0p0。 */
+  {
+    int npart = 0;
+    int pret = -1;
+    int attempt;
+
+    /* 实测 (2026-10-18): 开机那一刻第一次 open 常常返回 -EIO(5),
+     * 但**同一块卡在系统起来之后**用 hexdump 读 /dev/mmcsd0 是正常的
+     * (能读到 MBR 引导扇区)。所以这里是**上电就绪时序**问题, 不是卡坏。
+     * 重试几次, 每次间隔 200ms。 */
+    for (attempt = 0; attempt < 8; attempt++)
+      {
+        npart = 0;
+        pret = parse_block_partition("/dev/mmcsd0",
+                                     sf32lb52_tfcard_partition_handler,
+                                     &npart);
+        if (pret >= 0 && npart > 0)
+          {
+            break;
+          }
+
+        usleep(200 * 1000);
+      }
+
+    syslog(LOG_INFO, "INFO: TF partition scan: ret=%d found=%d attempts=%d\n",
+           pret, npart, attempt + 1);
+  }
+#endif
+
   ret = sf32lb52_tfcard_mount();
-  if (ret < 0)
-    {
-      serr("WARN: TF mount failed: %d\n", ret);
-    }
+  syslog(LOG_INFO, "INFO: TF mount result: %d\n", ret);
 
   return ret;
 }
@@ -241,6 +362,12 @@ static int sf32lb52_lsm6ds3_initialize(FAR struct i2c_master_s *i2c)
    *   PA40 - I2C2 SCL
    *   PA31 - INT
    *   PA30 - sensor LDO enable, active high
+   *
+   * WARNING: on sf32lb52-devkit-lcd both of those pads belong to the touch
+   * panel -- BSP_PIN_Touch() (bsp_pinmux.c) muxes PA30 as I2C1_SCL and PA31
+   * as the CTP interrupt.  Enabling this probe re-muxes PA30 into a GPIO
+   * output and takes the touch controller's I2C clock away.  Keep
+   * CONFIG_SENSORS_LSM6DSL off unless the sensor is really fitted and rewired.
    */
 
   HAL_PIN_Set(PAD_PA30, GPIO_A30, PIN_NOPULL, 1);
@@ -518,6 +645,9 @@ int sf32lb52_lchspi_ulp_bringup(void)
         }
 
 #if defined(CONFIG_SENSORS_LSM6DSL)
+#ifdef CONFIG_LCD
+      g_pending_imu_i2c = i2c1;
+#else
       tmpret = sf32lb52_lsm6ds3_initialize(i2c1);
       if (tmpret < 0)
         {
@@ -526,8 +656,116 @@ int sf32lb52_lchspi_ulp_bringup(void)
                  tmpret);
         }
 #endif
+#endif
     }
 #endif /* CONFIG_BSP_USING_I2C2 */
+
+#if defined(CONFIG_SENSORS_MPU60X0)
+  /* MPU6050 on a dedicated I2C3, muxed to PA39 (SCL) / PA40 (SDA).
+   *
+   * !! PA01 MUST NEVER BE USED !!
+   * bsp_pinmux.c muxes PA01 as GPTIM1_CH4 "LCD backlight PWM".  The
+   * timer is registered (CONFIG_BSP_USING_PWM2) but nothing ever calls
+   * pwm_open(), so the pad sits at a static LOW level - and the backlight
+   * is enabled by that LOW.  Anything that raises PA01 (I2C traffic, a
+   * sensor's internal pull-up, ...) turns the panel backlight OFF.
+   * Confirmed 2026-10-22: driving PA01 dropped the LCD refresh rate from
+   * ~2.4 Hz to one flush every several minutes; reverting restored it
+   * immediately.  PA00 is likewise off limits by policy - it carries the
+   * "#LCD_RESETB" marker and we simply do not need it.
+   *
+   * PA39/PA40 were chosen because:
+   *   - bsp_pinmux.c only assigns them LCDC1_8080_DIO3/4 inside the
+   *     "#elif defined(BSP_LCDC_USING_DBI)" branch, and this board uses
+   *     CONFIG_BSP_LCDC_USING_QADSPI, so those lines are NOT compiled;
+   *   - the I2C3_PINR register accepts any PA pad ("0 to 44 for PA00 to
+   *     PA44", see the sf32lb52-pac register docs);
+   *   - they are the exact pair used by published SF32LB52 I2C samples
+   *     (HAL_PIN_Set(PAD_PA39, I2Cx_SCL) / PAD_PA40, I2Cx_SDA);
+   *   - they are nowhere near any panel control line, and do not collide
+   *     with the MAX30102 already on PA41/PA42. */
+
+  {
+    /* Two wire orders are tried, because the published SiFli I2C sample
+     * uses PA39 = SDA / PA40 = SCL while this file originally assumed the
+     * opposite.  Trying both removes a whole round-trip of guessing.
+     *
+     * Speed stays at 100 kHz on purpose: the official SiFli I2C
+     * application note says the on-chip pull-ups are WEAK and that
+     * "when I2C uses only internal pull-ups, keep the speed at 100k".
+     * PA39/PA40 have no external pull-up resistors on this board, so
+     * 400 kHz would not drive the bus at all.  (Fit 4.7k pull-ups and
+     * 100k..200k becomes usable.) */
+    static const int k_order[2][2] =
+    {
+      { I2C3_SCL, I2C3_SDA },   /* PA39 = SCL, PA40 = SDA */
+      { I2C3_SDA, I2C3_SCL },   /* PA39 = SDA, PA40 = SCL (official sample) */
+    };
+
+    int attempt;
+
+    for (attempt = 0; attempt < 2; attempt++)
+      {
+        struct i2c_master_s *imu_i2c;
+        struct mpu_config_s mpucfg;
+
+        g_imu_pinmux_scl = HAL_PIN_Set(PAD_PA39, k_order[attempt][0],
+                                       PIN_PULLUP, 1);
+        g_imu_pinmux_sda = HAL_PIN_Set(PAD_PA40, k_order[attempt][1],
+                                       PIN_PULLUP, 1);
+
+        syslog(LOG_INFO,
+               "imu: try#%d PA39=%s PA40=%s (pinmux %d/%d)\n",
+               attempt,
+               k_order[attempt][0] == I2C3_SCL ? "SCL" : "SDA",
+               k_order[attempt][1] == I2C3_SCL ? "SCL" : "SDA",
+               g_imu_pinmux_scl, g_imu_pinmux_sda);
+
+        imu_i2c = sifli_i2cbus_initialize(2);      /* port 2 == I2C3 */
+        if (imu_i2c == NULL)
+          {
+            syslog(LOG_ERR, "ERROR: imu: i2cbus_initialize(2) failed\n");
+            break;
+          }
+
+        if (attempt == 0)
+          {
+            (void)i2c_register(imu_i2c, 2);        /* /dev/i2c2 */
+          }
+
+        memset(&mpucfg, 0, sizeof(mpucfg));
+        mpucfg.i2c  = imu_i2c;
+        mpucfg.addr = 0x68;              /* AD0 tied to GND */
+
+        tmpret = mpu60x0_register("/dev/mpu0", &mpucfg);
+        if (tmpret < 0)
+          {
+            mpucfg.addr = 0x69;          /* AD0 tied to VCC */
+            tmpret = mpu60x0_register("/dev/mpu0", &mpucfg);
+          }
+
+        if (tmpret == 0)
+          {
+            syslog(LOG_INFO,
+                   "imu: /dev/mpu0 ready (addr 0x%02x, order#%d)\n",
+                   mpucfg.addr, attempt);
+            break;
+          }
+
+        syslog(LOG_WARNING, "imu: order#%d failed (%d), trying swap\n",
+               attempt, tmpret);
+      }
+
+    if (tmpret < 0)
+      {
+        syslog(LOG_ERR,
+               "ERROR: mpu60x0_register failed: %d "
+               "(both wire orders tried; check power/wiring/AD0)\n",
+               tmpret);
+      }
+  }
+
+#endif /* CONFIG_SENSORS_MPU60X0 */
 #endif /* CONFIG_I2C */
 
 #if defined(CONFIG_SPI) && defined(CONFIG_BSP_USING_SPI1) && \
@@ -578,6 +816,32 @@ int sf32lb52_lchspi_ulp_bringup(void)
     }
 #endif
 
+#if defined(CONFIG_MTD) && defined(CONFIG_FS_LITTLEFS)
+  /* Replace the volatile tmpfs on /data with a persistent littlefs over
+   * the NOR partition, so agent config / memory / skills survive reboot.
+   * First boot: NOR partition is unformatted, format then mount.
+   */
+
+  nx_umount2("/data", 0);
+
+  ret = nx_mount("/dev/config0", "/data", "littlefs", 0, NULL);
+  if (ret < 0)
+    {
+      syslog(LOG_INFO, "INFO: formatting /dev/config0 as littlefs...\n");
+      ret = nx_mount("/dev/config0", "/data", "littlefs", 0,
+                     "forceformat");
+      if (ret < 0)
+        {
+          serr("WARN: littlefs mount on /data failed: %d\n", ret);
+          nx_mount(NULL, "/data", "tmpfs", 0, NULL);
+        }
+    }
+  else
+    {
+      syslog(LOG_INFO, "INFO: littlefs mounted on /data (persistent)\n");
+    }
+#endif
+
 #ifdef CONFIG_CDCACM
   ret = cdcacm_initialize(0, NULL);
   if (ret < 0)
@@ -586,12 +850,52 @@ int sf32lb52_lchspi_ulp_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_RNDIS
+  /* RNDIS Ethernet-over-USB: the host (PC) sees a network adapter when
+   * the device is plugged in via USB. Debug console remains on CH34x. */
+  {
+    static const uint8_t rndis_mac[6] =
+      { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+
+    ret = usbdev_rndis_initialize(rndis_mac);
+    if (ret < 0)
+      {
+        syslog(LOG_ERR, "ERROR: usbdev_rndis_initialize failed: %d\n", ret);
+      }
+  }
+#endif
+
 #ifdef CONFIG_UART_BTH4
   tmpret = sf32lb52_bt_initialize();
   if (tmpret < 0 && tmpret != -EEXIST)
     {
       serr("WARN: sf32lb52_bt_initialize failed: %d\n", tmpret);
     }
+#endif
+
+#ifdef CONFIG_RNDIS
+  {
+    /* RNDIS Ethernet-over-USB: the SF32LB52 USB device port is exposed
+     * on the second Type-C connector. The controller needs explicit
+     * init (usbdev_register does not call arm_usbinitialize here), then
+     * registering the RNDIS class driver enables SOFTCONN + D+ pullup
+     * so the host enumerates us. Locally-administered MAC (bit 0x02). */
+    static const uint8_t rndis_mac[6] =
+      { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+
+    extern void arm_usbinitialize(void);
+
+    arm_usbinitialize();
+    tmpret = usbdev_rndis_initialize(rndis_mac);
+    if (tmpret < 0)
+      {
+        serr("ERROR: usbdev_rndis_initialize failed: %d\n", tmpret);
+      }
+    else
+      {
+        syslog(LOG_INFO, "RNDIS initialized (MAC 02:00:00:00:00:01)\n");
+      }
+  }
 #endif
 
   return ret;

@@ -31,8 +31,21 @@ nuttx_add_romfs(
   RCRAWS
   etc/group
   etc/1.txt
+  # PATH is what genromfs actually packs. It has to be the binary dir, not
+  # ${CMAKE_CURRENT_LIST_DIR}: RCSRCS runs each script through "gcc -E -P -x c"
+  # into ${CMAKE_CURRENT_BINARY_DIR}/etc and RCRAWS copies the rest there, so
+  # pointing PATH at the source tree threw the preprocessed output away and
+  # packed the raw files instead (nuttx/cmake/nuttx_add_romfs.cmake:184-189).
+  #
+  # That made the preprocessing step a no-op and turned comments in rcS into a
+  # trap with two different failure modes: a '#' comment is an invalid
+  # preprocessing directive and breaks the build, while a /* */ comment
+  # survives into the packed file and NSH tries to run it as a command - which
+  # aborts the rest of the script, because nsh_script.c stops on first error.
+  # Every file listed above is either an RCSRC or an RCRAW, so the packed /etc
+  # has the same contents either way.
   PATH
-  ${CMAKE_CURRENT_LIST_DIR}/etc)
+  ${CMAKE_CURRENT_BINARY_DIR}/etc)
 
 target_link_libraries(board PRIVATE romfs_etc)
 

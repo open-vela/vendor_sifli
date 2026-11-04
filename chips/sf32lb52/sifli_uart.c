@@ -962,6 +962,16 @@ void arm_serialinit(void)
         uart_obj[i].serial.recv.size = CONFIG_UART_BUFSZ;
         uart_obj[i].serial.recv.buffer = g_uart_buffer[2*i+1];
         uart_obj[i].ser_cfg=config;
+#if defined(CONFIG_BSP_USING_UART2)
+        /* 2026-10-26: UART2 (PA20/PA27, 40-pin 排针 pin10/pin8) 作为外接
+         * 合宙 Air780E 4G 模块的 AT/PPP 数据口。模块主串口默认 115200,
+         * 不能沿用 console 的 CONFIG_UART_BAUD(1Mbps), 否则一条 AT 都收不到。
+         * 其他实例(UART1 console)保持 1Mbps 不变。 */
+        if (i == UART2_INDEX)
+          {
+            uart_obj[i].ser_cfg.baud_rate = 115200;
+          }
+#endif
 #ifdef CONSOLE_UART
         if (i == (CONSOLE_UART -1))
         {

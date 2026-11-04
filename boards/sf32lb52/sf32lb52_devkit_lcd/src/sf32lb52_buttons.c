@@ -27,10 +27,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <errno.h>
+#include <syslog.h>
 
 #include <nuttx/clock.h>
 #include <nuttx/input/buttons.h>
 #include <nuttx/wdog.h>
+
+#include <arch/board/board.h>
 
 #include "sifli_gpio.h"
 
@@ -40,9 +43,33 @@
  * Private Definitions
  ****************************************************************************/
 
+/* Both keys read high when pressed (pads default to pull-down).
+ *
+ * Key1 (PA34) is also the pin the ROM UART download path samples, which is
+ * why bsp_pinmux.c deliberately leaves its pad alone.  We only set the GPIO
+ * direction here -- sifli_gpio_config() does not touch the pad mux or pull,
+ * so the download strap keeps working.
+ */
+
 #define SF32LB52_BUTTON_KEY2_PIN      GET_PIN_2(hwp_gpio1, 11)
-#define SF32LB52_BUTTON_KEY2_ACTIVE_LOW 0
+#define SF32LB52_BUTTON_KEY1_PIN      GET_PIN_2(hwp_gpio1, 34)
 #define SF32LB52_BUTTON_POLL_MS       10
+
+struct sf32lb52_btnmap_s
+{
+  uint32_t pin;
+  btn_buttonset_t bit;
+  bool active_low;
+};
+
+static const struct sf32lb52_btnmap_s g_btnmap[] =
+{
+  { SF32LB52_BUTTON_KEY2_PIN, BUTTON_KEY2_BIT, false },
+  { SF32LB52_BUTTON_KEY1_PIN, BUTTON_KEY1_BIT, false },
+};
+
+#define SF32LB52_NBUTTONS (int)(sizeof(g_btnmap) / sizeof(g_btnmap[0]))
+#define SF32LB52_BUTTON_MASK (BUTTON_KEY2_BIT | BUTTON_KEY1_BIT)
 
 /****************************************************************************
  * Private Types
@@ -100,13 +127,20 @@ static struct sf32lb52_btnlower_s g_btnlower =
 
 static btn_buttonset_t sf32lb52_button_readset(void)
 {
-  bool level = sifli_gpio_read(SF32LB52_BUTTON_KEY2_PIN);
+  btn_buttonset_t set = 0;
+  int i;
 
-#if SF32LB52_BUTTON_KEY2_ACTIVE_LOW
-  return level ? 0 : 1;
-#else
-  return level ? 1 : 0;
-#endif
+  for (i = 0; i < SF32LB52_NBUTTONS; i++)
+    {
+      bool level = sifli_gpio_read(g_btnmap[i].pin);
+
+      if (level != g_btnmap[i].active_low)
+        {
+          set |= g_btnmap[i].bit;
+        }
+    }
+
+  return set;
 }
 
 static void sf32lb52_button_interrupt(void *arg)
@@ -165,7 +199,7 @@ static void sf32lb52_button_poll(wdparm_t arg)
 static btn_buttonset_t sf32lb52_btn_supported(
   FAR const struct btn_lowerhalf_s *lower)
 {
-  return 1;
+  return SF32LB52_BUTTON_MASK;
 }
 
 static btn_buttonset_t sf32lb52_btn_buttons(
@@ -184,13 +218,17 @@ static void sf32lb52_btn_enable(FAR const struct btn_lowerhalf_s *lower,
     (FAR struct sf32lb52_btnlower_s *)lower;
   btn_buttonset_t either = press | release;
   int ret;
+  int i;
 
   if (either == 0 || handler == NULL)
     {
       if (priv->irq_enabled)
         {
-          sifli_gpio_set_event(SF32LB52_BUTTON_KEY2_PIN, false, false,
-                               NULL, NULL);
+          for (i = 0; i < SF32LB52_NBUTTONS; i++)
+            {
+              sifli_gpio_set_event(g_btnmap[i].pin, false, false, NULL, NULL);
+            }
+
           priv->irq_enabled = false;
         }
 
@@ -208,16 +246,25 @@ static void sf32lb52_btn_enable(FAR const struct btn_lowerhalf_s *lower,
 
   if (!priv->irq_enabled)
     {
-      ret = sifli_gpio_set_event(SF32LB52_BUTTON_KEY2_PIN, true, true,
-                                 sf32lb52_button_interrupt, priv);
-      if (ret >= 0)
+      /* Arm both keys.  A key whose edge event cannot be installed still
+       * works through the 10 ms poll below, so a failure here is not fatal.
+       */
+
+      for (i = 0; i < SF32LB52_NBUTTONS; i++)
         {
-          priv->irq_enabled = true;
-        }
-      else
-        {
-          priv->handler = NULL;
-          priv->arg     = NULL;
+          ret = sifli_gpio_set_event(g_btnmap[i].pin, true, true,
+                                     sf32lb52_button_interrupt, priv);
+          if (ret >= 0)
+            {
+              priv->irq_enabled = true;
+            }
+          else
+            {
+              syslog(LOG_WARNING,
+                     "WARN: button pin %lu edge event failed: %d "
+                     "(falling back to poll)\n",
+                     (unsigned long)g_btnmap[i].pin, ret);
+            }
         }
     }
 
@@ -232,14 +279,25 @@ static void sf32lb52_btn_enable(FAR const struct btn_lowerhalf_s *lower,
 int sf32lb52_button_initialize(FAR const char *devname)
 {
   int ret;
+  int i;
 
-  sifli_gpio_config(SF32LB52_BUTTON_KEY2_PIN, GPIO_INPUT);
+  for (i = 0; i < SF32LB52_NBUTTONS; i++)
+    {
+      sifli_gpio_config(g_btnmap[i].pin, GPIO_INPUT);
+    }
 
   ret = btn_register(devname, &g_btnlower.lower);
   if (ret < 0)
     {
       return ret;
     }
+
+  /* Idle levels, logged once: a key that reads pressed while nothing is
+   * touched means its pad is not muxed to GPIO (or the pull is wrong).
+   */
+
+  syslog(LOG_INFO, "INFO: buttons registered at %s, idle set=0x%x\n",
+         devname, (unsigned)sf32lb52_button_readset());
 
   return OK;
 }

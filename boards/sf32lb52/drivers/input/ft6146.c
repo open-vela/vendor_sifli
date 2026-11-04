@@ -64,6 +64,10 @@ struct ft6146_touch_lowerhalf_s
   struct touch_lowerhalf_s lower;
   struct i2c_master_s *i2c;
   struct work_s work;
+#if CONFIG_INPUT_FT6146_POLL_MS > 0
+  struct work_s pollwork;
+  bool was_down;
+#endif
   mutex_t devlock;
   sem_t waitsem;
   uint32_t pin_irq;
@@ -109,10 +113,12 @@ static int ft6146_i2c_read(struct i2c_master_s *i2c,
   return ret < 0 ? ret : OK;
 }
 
-static void ft6146_data_worker(void *param)
+#ifdef CONFIG_INPUT_FT6146_TRACE
+static unsigned int g_ft6146_irqs;
+#endif
+
+static void ft6146_report(struct ft6146_touch_lowerhalf_s *ft6146)
 {
-  struct ft6146_touch_lowerhalf_s *ft6146 =
-    (struct ft6146_touch_lowerhalf_s *)param;
   struct touch_sample_s sample;
   uint8_t buf[5] = {0};
   uint8_t touch_num;
@@ -122,10 +128,26 @@ static void ft6146_data_worker(void *param)
   if (ret < 0)
     {
       ierr("ft6146: read touch data failed: %d\n", ret);
+#ifdef CONFIG_INPUT_FT6146_TRACE
+      syslog(LOG_ERR, "[ft6146] i2c read failed: %d\n", ret);
+#endif
       return;
     }
 
   touch_num = buf[0] & 0x0f;
+
+#if CONFIG_INPUT_FT6146_POLL_MS > 0
+  /* When polling, only publish transitions: a steady stream of TOUCH_UP
+   * samples would keep waking the input upper half for nothing.
+   */
+
+  if (touch_num == 0 && !ft6146->was_down)
+    {
+      return;
+    }
+
+  ft6146->was_down = (touch_num > 0);
+#endif
 
   sample.npoints = 1;
   if (touch_num > 0)
@@ -142,14 +164,41 @@ static void ft6146_data_worker(void *param)
   sample.point[0].x = ft6146->last_x;
   sample.point[0].y = ft6146->last_y;
 
+#ifdef CONFIG_INPUT_FT6146_TRACE
+  syslog(LOG_INFO, "[ft6146] irq=%u n=%u x=%u y=%u %s\n",
+         g_ft6146_irqs, touch_num, sample.point[0].x, sample.point[0].y,
+         touch_num > 0 ? "DOWN" : "UP");
+#endif
+
   touch_event(ft6146->lower.priv, &sample);
 }
+
+static void ft6146_data_worker(void *param)
+{
+  ft6146_report((struct ft6146_touch_lowerhalf_s *)param);
+}
+
+#if CONFIG_INPUT_FT6146_POLL_MS > 0
+static void ft6146_poll_worker(void *param)
+{
+  struct ft6146_touch_lowerhalf_s *ft6146 =
+    (struct ft6146_touch_lowerhalf_s *)param;
+
+  ft6146_report(ft6146);
+  work_queue(LPWORK, &ft6146->pollwork, ft6146_poll_worker, ft6146,
+             MSEC2TICK(CONFIG_INPUT_FT6146_POLL_MS));
+}
+#endif
 
 static void ft6146_irq_handler(void *arg)
 {
   struct ft6146_touch_lowerhalf_s *ft6146 =
     (struct ft6146_touch_lowerhalf_s *)arg;
   int ret;
+
+#ifdef CONFIG_INPUT_FT6146_TRACE
+  g_ft6146_irqs++;
+#endif
 
   ret = work_queue(HPWORK, &ft6146->work, ft6146_data_worker, ft6146, 0);
   DEBUGASSERT(ret == OK);
@@ -189,6 +238,10 @@ static int ft6146_hw_init(struct ft6146_touch_lowerhalf_s *ft6146)
     }
 
   iinfo("ft6146 id_h=0x%02x id_l=0x%02x\n", id_h, id_l);
+#ifdef CONFIG_INPUT_FT6146_TRACE
+  syslog(LOG_INFO, "[ft6146] id_h=0x%02x id_l=0x%02x irq_pin=%lu\n",
+         id_h, id_l, (unsigned long)ft6146->pin_irq);
+#endif
 
   ret = sifli_gpio_set_event(ft6146->pin_irq, false, true,
                              ft6146_irq_handler, ft6146);
@@ -197,6 +250,30 @@ static int ft6146_hw_init(struct ft6146_touch_lowerhalf_s *ft6146)
       ierr("ft6146: irq event setup failed: %d\n", ret);
       return ret;
     }
+
+  /* The controller holds INT asserted until the host reads the touch data
+   * register.  If it is already asserted when the falling edge is armed
+   * above, no further edge is ever produced and the panel stays silent for
+   * the rest of the session.  Drain it once so the edge can re-arm.
+   */
+
+  ft6146_i2c_read(ft6146->i2c, FT6146_REG_TD_STATUS, &id_l, 1);
+
+#ifdef CONFIG_INPUT_FT6146_TRACE
+  syslog(LOG_INFO, "[ft6146] armed irq on pin %lu, td_status=0x%02x\n",
+         (unsigned long)ft6146->pin_irq, id_l);
+#endif
+
+#if CONFIG_INPUT_FT6146_POLL_MS > 0
+  /* Some boards route the CTP interrupt to a pad that is not usable as an
+   * edge source; polling keeps the panel working there.  It runs alongside
+   * the interrupt, and ft6146_report() collapses repeats, so enabling both
+   * costs one I2C read per interval and produces no duplicate events.
+   */
+
+  work_queue(LPWORK, &ft6146->pollwork, ft6146_poll_worker, ft6146,
+             MSEC2TICK(CONFIG_INPUT_FT6146_POLL_MS));
+#endif
 
   return OK;
 }

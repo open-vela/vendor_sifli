@@ -71,6 +71,86 @@ static mutex_t g_lock = NXMUTEX_INITIALIZER;
 static QSPI_FLASH_CTX_T g_spi_nor_flash_ctx;
 static DMA_HandleTypeDef g_spi_nor_flash_dma_handle;
 static SPI_FLASH_FACT_CFG_T g_spi_nor_cmd_table_cache;
+
+/* ── V142-FIX: NOR op 超时 + begin/done 取证日志 ───────────────────
+ * 根因（RESET-LOG 报告）：HAL 的写/擦除忙轮询没有超时，且运行在
+ * up_irq_save() 关中断区间里；flash 一旦进入坏状态，整机冻结到 20s
+ * 硬件看门狗复位（无任何 dump）。
+ * bf0_hal_mpi.c/mpi_ex.c 的 HAL_FLASH_Timeout*（DWT 周期计数器，IRQ
+ * 关断时仍计数）给每次写/擦除/预初始化加 2s deadline；超时路径：HAL 返回
+ * 错误 → 调用方已恢复 IRQ → nor_hal_result() 恢复 AHB 读、失效 cache、
+ * 打 "[sf32lb_flash] ... timeout" 并返回 -EIO，系统可继续跑。
+ * 正常路径时序不变，只多几次 DWT 寄存器读。
+ * 日志限流：每个 boot 前 8 次 + 每 64 次打印 begin/done（超时日志不
+ * 受限流，永远打印），避免频繁写 flash 时刷屏。
+ */
+#define NOR_HAL_TIMEOUT_MS 2000
+
+extern void HAL_FLASH_TimeoutArm(uint32_t timeout_ms);
+extern void HAL_FLASH_TimeoutDisarm(void);
+extern int  HAL_FLASH_TimeoutHit(void);
+
+static void sf32lb_flash_cache_invalidate(uint32_t addr, uint32_t size);
+static void SF32LB_FLASH_RAMFUNC
+sf32lb_flash_restore_ahb_read(FAR FLASH_HandleTypeDef *hflash);
+
+static uint32_t g_nor_op_seq;
+
+static bool nor_op_log_wanted(void)
+{
+  return g_nor_op_seq < 8u || (g_nor_op_seq & 63u) == 0u;
+}
+
+/* 一次 HAL 写/擦除调用前：限流打 begin + 上 deadline（IRQ 开启时调用） */
+static void nor_hal_begin(const char *op, uint32_t addr, uint32_t size)
+{
+  g_nor_op_seq++;
+  HAL_FLASH_TimeoutArm(NOR_HAL_TIMEOUT_MS);
+  if (nor_op_log_wanted())
+    {
+      syslog(LOG_INFO,
+             "[sf32lb_flash] NOR op begin: %s addr=0x%08lx size=%lu seq=%lu\n",
+             op, (unsigned long)addr, (unsigned long)size,
+             (unsigned long)g_nor_op_seq);
+    }
+}
+
+/* HAL 返回且 IRQ 已恢复后：超时→恢复 AHB 读/cache、打错误、返回 -EIO */
+static int nor_hal_result(FAR FLASH_HandleTypeDef *hflash, const char *op,
+                          uint32_t addr, uint32_t size, int rc)
+{
+  int hit = HAL_FLASH_TimeoutHit();
+
+  HAL_FLASH_TimeoutDisarm();
+
+  if (hit)
+    {
+      if (hflash != NULL)
+        {
+          sf32lb_flash_restore_ahb_read(hflash);
+          sf32lb_flash_cache_invalidate(hflash->base + addr, size);
+        }
+      else
+        {
+          sf32lb_flash_cache_invalidate(addr, size);
+        }
+      syslog(LOG_ERR,
+             "[sf32lb_flash] %s timeout: addr=0x%08lx size=%lu (>%dms, NOR busy/stuck?)\n",
+             op, (unsigned long)addr, (unsigned long)size,
+             NOR_HAL_TIMEOUT_MS);
+      return -EIO;
+    }
+
+  if (nor_op_log_wanted())
+    {
+      syslog(LOG_INFO,
+             "[sf32lb_flash] NOR op done: %s addr=0x%08lx size=%lu rc=%d\n",
+             op, (unsigned long)addr, (unsigned long)size, rc);
+    }
+
+  return rc;
+}
+
 static bool g_flash_hw_initialized;
 
 /****************************************************************************
@@ -78,13 +158,33 @@ static bool g_flash_hw_initialized;
  ****************************************************************************/
 
 static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void);
+static void SF32LB_FLASH_RAMFUNC sf32lb_flash_spin_us(uint32_t us);
+static void SF32LB_FLASH_RAMFUNC
+sf32lb_flash_reset_to_qmode(FAR FLASH_HandleTypeDef *hflash);
 static int sf32lb_nor_sync_geometry(FAR struct sf32lb_nor_dev_s *priv,
                                     bool allow_offset_fallback);
+/* v142b 2026-11-04：用户要求先关闭 /data 持久化写，验证 NOR 写窗口冻结根因。
+ * 运行期默认只读；所有 MTD 写/擦除在进入硬件前返回 -EROFS，绝不触 NOR。
+ * 恢复写：把 g_nor_data_ro 置 false（后续可加 NSH/配置开关）。 */
+volatile bool g_nor_data_ro = true;
+static unsigned int s_nor_ro_logs;
+
+static bool nor_data_ro_reject(const char *op)
+{
+  if (!g_nor_data_ro) return false;
+  if (s_nor_ro_logs < 8) {
+    s_nor_ro_logs++;
+    syslog(LOG_INFO, "[sf32lb_flash] %s rejected (data read-only)\n", op);
+  }
+  return true;
+}
+
 static bool sf32lb_flash_verify_erased(uint32_t addr, uint32_t size);
 static bool sf32lb_flash_verify_written(uint32_t addr,
                                         FAR const uint8_t *buffer,
                                         uint32_t size);
-static void sf32lb_flash_restore_ahb_read(FAR FLASH_HandleTypeDef *hflash);
+static void SF32LB_FLASH_RAMFUNC
+sf32lb_flash_restore_ahb_read(FAR FLASH_HandleTypeDef *hflash);
 static bool sf32lb_flash_is_xip_buffer(FAR const uint8_t *buffer,
                                        uint32_t size);
 static int SF32LB_FLASH_RAMFUNC
@@ -178,6 +278,47 @@ static int sf32lb_flash_hw_init(void)
   return -EIO;
 }
 
+static void SF32LB_FLASH_RAMFUNC sf32lb_flash_spin_us(uint32_t us)
+{
+  /* Delay helper for windows where the NOR chip cannot serve reads, so
+   * HAL_Delay_us() (linked into XIP flash) must not be used.  Loop body is
+   * RAM resident and the counter lives on the stack.  Sized for the fastest
+   * HCPU clock with a wide margin: it only ever waits longer than asked.
+   */
+
+  volatile uint32_t loops = us * 100U + 1U;
+
+  while (loops--)
+    {
+      __asm__ volatile ("nop");
+      __asm__ volatile ("nop");
+      __asm__ volatile ("nop");
+      __asm__ volatile ("nop");
+    }
+}
+
+static void SF32LB_FLASH_RAMFUNC
+sf32lb_flash_reset_to_qmode(FAR FLASH_HandleTypeDef *hflash)
+{
+  /* Software-reset the NOR chip, then put the controller back into quad mode.
+   *
+   * From the RST opcode until the quad-mode restore the chip is unresponsive
+   * for up to tRST, so nothing in this window may fetch instructions or read
+   * data from XIP flash: the delay helper, the HAL entry points and
+   * hflash->ctable all have to be in SRAM already.  The caller must also keep
+   * interrupts disabled -- an ISR vectoring into XIP flash faults the same
+   * way, which is what made the failure look intermittent (it survived only
+   * when the code it needed happened to still be in I-cache).
+   */
+
+  HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RST_EN, 0);
+  HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RST, 0);
+  sf32lb_flash_spin_us(30);
+
+  hflash->Mode = HAL_FLASH_QMODE;
+  HAL_FLASH_SET_QUAL_SPI(hflash, true);
+}
+
 static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void)
 {
   FAR FLASH_HandleTypeDef *hflash;
@@ -192,6 +333,7 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void)
 
   hflash = &g_spi_nor_flash_ctx.handle;
 
+
   memset(&g_spi_nor_flash_ctx, 0, sizeof(g_spi_nor_flash_ctx));
   memset(&g_spi_nor_flash_dma_handle, 0, sizeof(g_spi_nor_flash_dma_handle));
 
@@ -200,11 +342,16 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void)
   hflash->size = SF32LB_NOR_TOTAL_SIZE;
   hflash->freq = 24000000;
 
+  nor_hal_begin("preinit", 0, 0);
   sf32lb_flash_lock();
   flags = up_irq_save();
   status = HAL_FLASH_PreInit(hflash);
   up_irq_restore(flags);
   sf32lb_flash_unlock();
+  if (nor_hal_result(hflash, "preinit", 0, 0, (int)status) == -EIO)
+    {
+      return -EIO;
+    }
 
   if (status != HAL_OK)
     {
@@ -227,18 +374,21 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void)
          sizeof(g_spi_nor_cmd_table_cache));
   hflash->ctable = &g_spi_nor_cmd_table_cache;
 
-  /* Exit potential vendor continuous-read state before write/erase. */
-
-  HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RST_EN, 0);
-  HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RST, 0);
-  HAL_Delay_us(30);
-
-  /* Board flash2 uses 4-line SPI in normal runtime (line=2 in board init).
-   * HAL_FLASH_PreInit forces Mode=0; restore quad mode explicitly.
+  /* Exit potential vendor continuous-read state before write/erase.
+   *
+   * HAL_FLASH_PreInit() left the AHB read command on FREAD, so plain XIP
+   * fetches still work up to this point; the chip reset below is what makes
+   * flash unreadable, hence the RAM resident helper under a hard IRQ lock.
    */
 
-  hflash->Mode = HAL_FLASH_QMODE;
-  HAL_FLASH_SET_QUAL_SPI(hflash, true);
+  nor_hal_begin("preinit-reset", 0, 0);
+  flags = up_irq_save();
+  sf32lb_flash_reset_to_qmode(hflash);
+  up_irq_restore(flags);
+  if (nor_hal_result(hflash, "preinit-reset", 0, 0, 0) == -EIO)
+    {
+      return -EIO;
+    }
 
   /* HAL_FLASH_PreInit sets hflash->dma = NULL but HAL_QSPIEX_WRITE_PAGE
    * requires DMA for reliable page-program operations.  Configure DMA
@@ -246,6 +396,12 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void)
    */
 
 #ifdef CONFIG_BSP_QSPI2_USING_DMA
+  /* NOTE: the DMA page-program path writes nothing on this board (the
+   * verify step keeps reading back 0xFF while the write reports success),
+   * while the manual FIFO path is known-good.  Keep hflash->dma = NULL so
+   * HAL_QSPIEX_WRITE_PAGE falls back to the FIFO path.
+   */
+#if 0
   hflash->dma = &g_spi_nor_flash_dma_handle;
   hflash->dma->Instance                 = FLASH2_DMA_INSTANCE;
   hflash->dma->Init.Request             = FLASH2_DMA_REQUEST;
@@ -258,6 +414,7 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void)
   hflash->dma->Init.Priority            = DMA_PRIORITY_MEDIUM;
   hflash->dma->Init.BurstSize           = 1;
   HAL_FLASH_SET_TXSLOT(hflash, hflash->dma->Init.BurstSize);
+#endif
 
 #else
   syslog(LOG_WARNING,
@@ -266,7 +423,15 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_flash_preinit_runtime(void)
 
   /* Ensure NOR is writable -- clear status register protection bits. */
 
+  nor_hal_begin("preinit-unlock", 0, 0);
+  flags = up_irq_save();
   HAL_FLASH_CLR_PROTECT(hflash);
+  up_irq_restore(flags);
+  if (nor_hal_result(hflash, "preinit-unlock", 0, 0, 0) == -EIO)
+    {
+      return -EIO;
+    }
+
   sf32lb_flash_try_global_unlock(hflash);
 
   detected_size = hflash->size;
@@ -462,7 +627,8 @@ static bool sf32lb_flash_verify_written(uint32_t addr,
   return true;
 }
 
-static void sf32lb_flash_restore_ahb_read(FAR FLASH_HandleTypeDef *hflash)
+static void SF32LB_FLASH_RAMFUNC
+sf32lb_flash_restore_ahb_read(FAR FLASH_HandleTypeDef *hflash)
 {
   bool qmode;
 
@@ -516,6 +682,17 @@ sf32lb_flash_try_global_unlock(FAR FLASH_HandleTypeDef *hflash)
 
   HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_WREN, 0);
   (void)sf32lb_flash_issue_raw_cmd(hflash, 0x98); /* ULBPR/global unlock */
+
+  /* ★ 2026-10-24: HAL_FLASH_MANUAL_CMD() 把 QSPI 切到 manual 模式后不会自己
+   * 切回来, 而 sf32lb_flash_unlock() 是 XIP 代码。manual 模式下 AHB 读失效,
+   * 下一条取指就从读不出内容的 flash 拿 -> HardFault(任务 AppBringUp,
+   * 崩在 boot 时 nx_mount("/dev/config0") 首次访问 NOR)。
+   * 所以必须在这里、放开中断之前把 AHB 读恢复, 让后面的 XIP 调用安全。
+   * 另外留一点时间给芯片完成 0x98 的内部写(tW), 免得恢复后读到忙状态。
+   */
+
+  sf32lb_flash_spin_us(200);
+  sf32lb_flash_restore_ahb_read(hflash);
 
   up_irq_restore(flags);
   sf32lb_flash_unlock();
@@ -649,6 +826,7 @@ static int sf32lb_nor_prepare_io(FAR struct sf32lb_nor_dev_s *priv,
   uint64_t part_size;
   int ret;
 
+
   if (priv == NULL || priv->spi_flash_handle == NULL)
     {
       return -EINVAL;
@@ -661,6 +839,7 @@ static int sf32lb_nor_prepare_io(FAR struct sf32lb_nor_dev_s *priv,
         {
           return ret;
         }
+
     }
 
   ret = sf32lb_nor_sync_geometry(priv, true);
@@ -668,6 +847,7 @@ static int sf32lb_nor_prepare_io(FAR struct sf32lb_nor_dev_s *priv,
     {
       return ret;
     }
+
 
   part_size = (uint64_t)priv->nsectors * SF32LB_NOR_PAGE_SIZE;
   if (((uint64_t)offset + (uint64_t)nbytes) > part_size)
@@ -715,11 +895,15 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_nor_erase_range(FAR FLASH_HandleTypeDef *
 
   if (size >= hflash->size)
     {
+      nor_hal_begin("erase-chip", 0, size);
       sf32lb_flash_lock();
       flags = up_irq_save();
       ret = HAL_QSPIEX_CHIP_ERASE(hflash);
       up_irq_restore(flags);
       sf32lb_flash_unlock();
+      /* 先恢复 AHB 读，保证下面的 XIP 日志/nor_hal_result 安全 */
+      sf32lb_flash_restore_ahb_read(hflash);
+      ret = nor_hal_result(hflash, "erase-chip", 0, size, ret);
       return ret == 0 ? OK : -EIO;
     }
 
@@ -741,6 +925,7 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_nor_erase_range(FAR FLASH_HandleTypeDef *
     {
       chunk_addr = erase_addr;
       chunk_size = 0;
+      nor_hal_begin("erase", erase_addr, 0);
       sf32lb_flash_lock();
       flags = up_irq_save();
       if (IS_ALIGNED(QSPI_NOR_BLK64_SIZE, erase_addr) &&
@@ -806,6 +991,9 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_nor_erase_range(FAR FLASH_HandleTypeDef *
         }
       up_irq_restore(flags);
       sf32lb_flash_unlock();
+      /* 先恢复 AHB 读，保证下面的 XIP 日志/nor_hal_result 安全 */
+      sf32lb_flash_restore_ahb_read(hflash);
+      ret = nor_hal_result(hflash, "erase", chunk_addr, chunk_size, ret);
 
       if (ret != 0)
         {
@@ -833,6 +1021,40 @@ static int SF32LB_FLASH_RAMFUNC sf32lb_nor_erase_range(FAR FLASH_HandleTypeDef *
   return OK;
 }
 
+/* QPP (quad page program) requires the flash chip's QE bit, but the
+ * vendor HAL never programs QE for NOR flash (NOR_TYPE0 has no WRSR2),
+ * so quad writes are silently ignored by the chip.  Use single-line PP
+ * (0x02) instead, which works regardless of the QE state; the caller
+ * restores quad mode afterwards so XIP reads keep working.
+ */
+
+static int SF32LB_FLASH_RAMFUNC
+sf32lb_flash_write_page_single(FAR FLASH_HandleTypeDef *hflash,
+                               uint32_t addr,
+                               FAR const uint8_t *buf,
+                               uint32_t size)
+{
+  int ret;
+
+  hflash->Mode = HAL_FLASH_NOR_MODE;
+  ret = HAL_QSPIEX_WRITE_PAGE(hflash, addr, buf, size);
+  hflash->Mode = HAL_FLASH_QMODE;
+
+  /* 收尾必须先把 AHB 读恢复成可 XIP 状态再返回：本函数运行在
+   * up_irq_save() 关中断区里，返回后 caller 的下一条 XIP 指令
+   * （nor_hal_result/syslog 等）不能落在"NOR 不可读"的窗口里。
+   * deadline 命中时不在这里打日志，返回 -ETIMEDOUT，
+   * 由 caller 在 up_irq_restore() 之后统一处理/打印。 */
+  sf32lb_flash_restore_ahb_read(hflash);
+
+  if (HAL_FLASH_TimeoutHit())
+    {
+      return -ETIMEDOUT;
+    }
+
+  return ret;
+}
+
 static ssize_t SF32LB_FLASH_RAMFUNC sf32lb_nor_write_range(FAR FLASH_HandleTypeDef *hflash,
                                                            uint32_t addr,
                                                            FAR const uint8_t *buffer,
@@ -847,6 +1069,7 @@ static ssize_t SF32LB_FLASH_RAMFUNC sf32lb_nor_write_range(FAR FLASH_HandleTypeD
   uint32_t phys_addr;
   ssize_t cnt;
   int ret;
+  irqstate_t flags;
   FAR const uint8_t *tbuf;
   FAR const uint8_t *chunk_buf;
   uint8_t stage_buf[QSPI_NOR_PAGE_SIZE];
@@ -898,9 +1121,14 @@ static ssize_t SF32LB_FLASH_RAMFUNC sf32lb_nor_write_range(FAR FLASH_HandleTypeD
           chunk_buf = stage_buf;
         }
 
+      nor_hal_begin("write", taddr, start);
       sf32lb_flash_lock();
-      ret = HAL_QSPIEX_WRITE_PAGE(hflash, taddr, chunk_buf, start);
+      flags = up_irq_save();
+      ret = sf32lb_flash_write_page_single(hflash, taddr, chunk_buf,
+                                           start);
+      up_irq_restore(flags);
       sf32lb_flash_unlock();
+      ret = nor_hal_result(hflash, "write", taddr, start, ret);
       if (ret != (int)start)
         {
           syslog(LOG_ERR,
@@ -941,9 +1169,14 @@ static ssize_t SF32LB_FLASH_RAMFUNC sf32lb_nor_write_range(FAR FLASH_HandleTypeD
           chunk_buf = stage_buf;
         }
 
+      nor_hal_begin("write", taddr, aligned_size);
       sf32lb_flash_lock();
-      ret = HAL_QSPIEX_WRITE_PAGE(hflash, taddr, chunk_buf, aligned_size);
+      flags = up_irq_save();
+      ret = sf32lb_flash_write_page_single(hflash, taddr, chunk_buf,
+                                           aligned_size);
+      up_irq_restore(flags);
       sf32lb_flash_unlock();
+      ret = nor_hal_result(hflash, "write", taddr, aligned_size, ret);
       if (ret != (int)aligned_size)
         {
           syslog(LOG_ERR,
@@ -984,9 +1217,14 @@ static ssize_t SF32LB_FLASH_RAMFUNC sf32lb_nor_write_range(FAR FLASH_HandleTypeD
           chunk_buf = stage_buf;
         }
 
+      nor_hal_begin("write", taddr, tsize);
       sf32lb_flash_lock();
-      ret = HAL_QSPIEX_WRITE_PAGE(hflash, taddr, chunk_buf, tsize);
+      flags = up_irq_save();
+      ret = sf32lb_flash_write_page_single(hflash, taddr, chunk_buf,
+                                           tsize);
+      up_irq_restore(flags);
       sf32lb_flash_unlock();
+      ret = nor_hal_result(hflash, "write", taddr, tsize, ret);
       if (ret != (int)tsize)
         {
           syslog(LOG_ERR,
@@ -1025,9 +1263,15 @@ static ssize_t sf32lb_nor_read(FAR struct mtd_dev_s *dev, off_t offset,
   FAR struct sf32lb_nor_dev_s *priv = (FAR struct sf32lb_nor_dev_s *)dev;
   int ret;
 
+
   if (offset < 0)
     {
       return -EINVAL;
+    }
+
+  if (nor_data_ro_reject("write"))
+    {
+      return -EROFS;
     }
 
   ret = sf32lb_nor_prepare_io(priv, (uint32_t)offset, (uint32_t)nbytes);
@@ -1089,6 +1333,11 @@ static int sf32lb_nor_erase(FAR struct mtd_dev_s *dev, off_t startblock,
   if (startblock < 0)
     {
       return -EINVAL;
+    }
+
+  if (nor_data_ro_reject("erase"))
+    {
+      return -EROFS;
     }
 
   ret = sf32lb_nor_prepare_io(priv,
