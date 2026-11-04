@@ -407,6 +407,12 @@ int sf32lb_adc_init(const char *devpath)
         sf32lb_adc_default_config(&loc_ctx);
         memcpy(adc_handle, &loc_ctx, sizeof(ADC_HandleTypeDef));
 
+        /* ADC_CHAN_VBAT now names the channel that actually tracks the cell
+         * on this board; see the comment above the macro in sf32lb_adc.h for
+         * the measurements behind it. Keeping the symbolic name here means
+         * there is exactly one place to change it.
+         */
+
         ctx->channel = ADC_CHAN_VBAT;
         ctx->ref = 0;
 

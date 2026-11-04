@@ -30,5 +30,6 @@ int sf32lb52_bt_controller_enable(void);
 int sf32lb52_bt_controller_disable(void);
 int sf32lb52_hci_register_callback(sf32lb52_bt_rx_callback_t callback);
 int sf32lb52_host_send_packet(const uint8_t *data, uint16_t len);
+int sf32lb52_bt_prepare_lcpu_boot(void);
 
 #endif

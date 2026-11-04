@@ -141,6 +141,54 @@ const uintptr_t g_idle_topstack = HEAP_BASE;
  * Private Functions
  ****************************************************************************/
 
+#ifdef CONFIG_BT_H4
+#  ifdef CONFIG_ARM_MPU
+#    error "Map the SF32LB52 BT IPC rings as non-cacheable in the MPU table"
+#  endif
+
+static void sifli_bt_shared_mpu_initialize(void)
+{
+  uint32_t regions;
+  uint32_t region;
+
+  /* The flat port does not use NuttX MPU regions.  Replace any bootloader
+   * regions, which could overlap these mappings (ARMv8-M forbids overlaps),
+   * and retain the architectural default map for all other privileged
+   * accesses.  An MPU-managed build must put the rings in its own table.
+   *
+   * Each vendor ring has a 20-byte header: the two CPUs update different
+   * words of the same cache line.  Cleaning the HCPU's read/write index
+   * therefore writes stale peer indices and payload bytes back to SRAM.
+   * HCPU interrupt masking cannot protect against the LCPU.  Make both
+   * complete rings Normal non-cacheable, shareable memory before either
+   * CPU initializes them, while keeping caches enabled elsewhere.
+   */
+
+#ifdef CONFIG_ARMV8M_DCACHE
+  up_disable_dcache();
+#endif
+  ARM_MPU_Disable();
+  regions = (MPU->TYPE & MPU_TYPE_DREGION_Msk) >> MPU_TYPE_DREGION_Pos;
+  for (region = 0; region < regions; region++)
+    {
+      ARM_MPU_ClrRegion(region);
+    }
+
+  ARM_MPU_SetMemAttr(0,
+                    ARM_MPU_ATTR(ARM_MPU_ATTR_NON_CACHEABLE,
+                                 ARM_MPU_ATTR_NON_CACHEABLE));
+  ARM_MPU_SetRegion(0,
+      ARM_MPU_RBAR(HCPU2LCPU_MB_CH1_BUF_START_ADDR,
+                   ARM_MPU_SH_OUTER, 0, 1, 1),
+      ARM_MPU_RLAR(HCPU2LCPU_MB_CH1_BUF_END_ADDR, 0));
+  ARM_MPU_SetRegion(1,
+      ARM_MPU_RBAR(LCPU_ADDR_2_HCPU_ADDR(LCPU2HCPU_MB_CH1_BUF_START_ADDR),
+                   ARM_MPU_SH_OUTER, 0, 1, 1),
+      ARM_MPU_RLAR(LCPU_ADDR_2_HCPU_ADDR(LCPU2HCPU_MB_CH1_BUF_END_ADDR), 0));
+  ARM_MPU_Enable(MPU_CTRL_PRIVDEFENA_Msk);
+}
+#endif
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
@@ -195,6 +243,10 @@ void __start(void)
     }
 
   arm_lowputc('A'); /* data segment init done */
+
+#ifdef CONFIG_BT_H4
+  sifli_bt_shared_mpu_initialize();
+#endif
 
 #ifdef CONFIG_ARMV8M_ICACHE
   up_enable_icache();

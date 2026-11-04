@@ -1,2 +1,6 @@
+#include <nuttx/config.h>
+
 sleep 3
-vapp hap://app/com.application.lyra.demo &
+#ifndef CONFIG_EXAMPLES_AI_WATCH
+vapp "hap://app/com.application.lyra.demo" &
+#endif
