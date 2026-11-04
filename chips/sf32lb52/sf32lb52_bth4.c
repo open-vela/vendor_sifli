@@ -160,6 +160,7 @@ struct sf32lb52_bt_priv_s
 };
 
 static int sf32lb52_bt_open(struct bt_driver_s *drv);
+void sf32lb52_lcpu_boot_dump_evidence(void);
 static int sf32lb52_bt_send(struct bt_driver_s *drv,
                             enum bt_buf_type_e type,
                             void *data, size_t len);
@@ -564,6 +565,8 @@ static int sf32lb52_bt_send(struct bt_driver_s *drv,
         *hdr = H4_ISO;
         break;
       default:
+        syslog(LOG_ERR, "sf32lb52 bth4 send: bad type %u\n",
+               (unsigned int)type);
         return -EINVAL;
     }
 
@@ -572,7 +575,14 @@ static int sf32lb52_bt_send(struct bt_driver_s *drv,
       opcode = sf32lb52_bt_get_le16(data);
       if (sf32lb52_bt_emulate_cmd(priv, opcode, &ret))
         {
-          return ret < 0 ? ret : len;
+          if (ret < 0)
+            {
+              syslog(LOG_ERR, "sf32lb52 bth4 send: emulate 0x%04x "
+                     "failed: %d\n", opcode, ret);
+              return ret;
+            }
+
+          return len;
         }
 
       ret = sf32lb52_bt_ensure_controller_enabled(opcode);
@@ -608,6 +618,8 @@ static int sf32lb52_bt_send(struct bt_driver_s *drv,
   ret = sf32lb52_host_send_packet(hdr, len + drv->head_reserve);
   if (ret < 0)
     {
+      syslog(LOG_ERR, "sf32lb52 bth4 send: host_send_packet failed: %d\n",
+             ret);
       return ret;
     }
 
@@ -642,12 +654,15 @@ static int sf32lb52_bt_open(struct bt_driver_s *drv)
   ret = sf32lb52_bt_controller_init();
   if (ret < 0)
     {
+      syslog(LOG_ERR, "sf32lb52 bth4: controller_init failed: %d\n", ret);
       return ret;
     }
 
   ret = sf32lb52_hci_register_callback(sf32lb52_bt_recv_cb);
   if (ret < 0)
     {
+      syslog(LOG_ERR, "sf32lb52 bth4: register rx callback failed: %d\n",
+             ret);
       return ret;
     }
 

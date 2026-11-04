@@ -203,9 +203,29 @@ static void BSP_PIN_Common(void)
 
     // GPIOs
     HAL_PIN_Set(PAD_PA26, GPIO_A26, PIN_NOPULL, 1);
-    HAL_PIN_Set(PAD_PA38, GPIO_A38, PIN_PULLDOWN, 1);
+    HAL_PIN_Set(PAD_PA38, GPIO_A38, PIN_NOPULL, 1);
     HAL_PIN_Set(PAD_PA30, GPIO_A30, PIN_PULLDOWN, 1);   // Sensor Power
     HAL_PIN_Set(PAD_PA44, GPIO_A44, PIN_NOPULL, 1);     // VBUS_DET
+
+    /* Raise VSYS here instead of waiting for BSP_PIN_LCD().
+     *
+     * PA38 is the enable of the VSYS rail ("VSYS on", see BSP_PIN_LCD below).
+     * This function used to park it as an input with a pull-down, and only
+     * BSP_PIN_LCD() drove it high. With VBUS present that is harmless: the USB
+     * supply holds the rail up regardless. On a cold start from the cell
+     * alone nothing else holds it, so the rail sags in the window between the
+     * two functions.
+     *
+     * Cold starts from the cell alone do eventually come up on this board,
+     * but only after roughly ten seconds, which is what the sag costs while
+     * the rail recovers. Driving the pin high as soon as it is configured
+     * removes the window and the wait with it. PA26 and PA30 are deliberately
+     * left alone: both are already driven by BSP_PIN_LCD()/BSP_PowerUp()
+     * within microseconds, and moving the sensor rail earlier would only add
+     * unverified timing changes.
+     */
+
+    BSP_GPIO_Set(38, 1, 1);
 #endif
 
 }

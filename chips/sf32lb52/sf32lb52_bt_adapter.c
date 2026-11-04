@@ -65,6 +65,7 @@ struct sf32lb52_bt_env_s
   sf32lb52_bt_rx_callback_t notify_host;
   struct work_s rx_work;
   bool queue_open;
+  volatile bool rx_enabled;
   bool wake_held;
   volatile bool rx_work_pending;
   bool rx_worker_running;
@@ -161,6 +162,11 @@ static int sf32lb52_bt_wait_rx_ring_ready(void)
 
       if (sf32lb52_bt_rx_ring_valid(rx_ring))
         {
+          syslog(LOG_INFO,
+                 "sf32lb52 bt ring ready: size=%ld rd=%08lx wr=%08lx\n",
+                 (long)rx_ring->buffer_size,
+                 (unsigned long)rx_ring->read_idx_mirror,
+                 (unsigned long)rx_ring->write_idx_mirror);
           return OK;
         }
 
@@ -437,7 +443,8 @@ static void sf32lb52_bt_rx_worker(FAR void *arg)
 
           flags = enter_critical_section();
 
-          if (!env->queue_open || env->ipc_port == IPC_QUEUE_INVALID_HANDLE)
+          if (!env->queue_open || !env->rx_enabled ||
+              env->ipc_port == IPC_QUEUE_INVALID_HANDLE)
             {
               env->rx_work_pending = false;
               env->rx_worker_running = false;
@@ -453,7 +460,8 @@ static void sf32lb52_bt_rx_worker(FAR void *arg)
 
           flags = enter_critical_section();
 
-          if (!env->queue_open || env->ipc_port == IPC_QUEUE_INVALID_HANDLE)
+          if (!env->queue_open || !env->rx_enabled ||
+              env->ipc_port == IPC_QUEUE_INVALID_HANDLE)
             {
               env->rx_work_pending = false;
               env->rx_worker_running = false;
@@ -561,7 +569,7 @@ static int32_t sf32lb52_bt_rx_ind(ipc_queue_handle_t handle, size_t size)
       return -EINVAL;
     }
 
-  if (!env->queue_open)
+  if (!env->rx_enabled)
     {
       struct circular_buf *rx_ring = (struct circular_buf *)SF32LB52_BT_RX_BUF_ADDR;
       #if SF32LB52_BT_TRACE
@@ -650,6 +658,14 @@ int sf32lb52_bt_controller_init(void)
       return OK;
     }
 
+  syslog(LOG_INFO,
+         "sf32lb52 bt shared MPU: ctrl=%08lx attr=%02lx "
+         "tx=%08lx rx=%08lx normal-NC shareable\n",
+         (unsigned long)MPU->CTRL,
+         (unsigned long)(MPU->MAIR[0] & 0xff),
+         (unsigned long)SF32LB52_BT_TX_BUF_ADDR,
+         (unsigned long)SF32LB52_BT_RX_BUF_ADDR);
+
   memset(&g_sf32lb52_bt_env, 0, sizeof(g_sf32lb52_bt_env));
   ret = sf32lb52_bt_mailbox_init();
   if (ret < 0)
@@ -680,6 +696,7 @@ int sf32lb52_bt_controller_deinit(void)
     }
 
   g_sf32lb52_bt_env.queue_open = false;
+  g_sf32lb52_bt_env.rx_enabled = false;
   g_sf32lb52_bt_env.rx_work_pending = false;
   g_sf32lb52_bt_env.rx_worker_running = false;
   if (!work_available(&g_sf32lb52_bt_env.rx_work))
@@ -719,6 +736,68 @@ int sf32lb52_hci_register_callback(sf32lb52_bt_rx_callback_t callback)
   return OK;
 }
 
+int sf32lb52_bt_prepare_lcpu_boot(void)
+{
+  struct circular_buf *rx_ring;
+  uint32_t retained_rd;
+  uint32_t retained_wr;
+  int16_t retained_size;
+  int ret;
+
+  if (g_sf32lb52_bt_status != SF32LB52_BT_STATUS_INITED)
+    {
+      return OK;
+    }
+
+  rx_ring = (struct circular_buf *)SF32LB52_BT_RX_BUF_ADDR;
+  up_invalidate_dcache((uintptr_t)SF32LB52_BT_RX_BUF_ADDR,
+                       (uintptr_t)SF32LB52_BT_RX_BUF_ADDR +
+                       SF32LB52_BT_RX_BUF_SIZE);
+  retained_rd = rx_ring->read_idx_mirror;
+  retained_wr = rx_ring->write_idx_mirror;
+  retained_size = rx_ring->buffer_size;
+  syslog(LOG_INFO,
+         "sf32lb52 bt ring preboot: size=%d rd=%08lx wr=%08lx\n",
+         retained_size, (unsigned long)retained_rd,
+         (unsigned long)retained_wr);
+
+  rx_ring->read_idx_mirror = UINT32_MAX;
+  rx_ring->write_idx_mirror = UINT32_MAX;
+  rx_ring->buffer_size = 0;
+  up_clean_dcache((uintptr_t)SF32LB52_BT_RX_BUF_ADDR,
+                  (uintptr_t)SF32LB52_BT_RX_BUF_ADDR +
+                  sizeof(*rx_ring));
+  __DSB();
+
+  /* Clear retained mailbox notifications and initialize the HCPU->LCPU
+   * ring before releasing the LCPU.  This avoids resetting queue indices
+   * after the controller has started consuming the shared ring.
+   */
+
+  L2H_MAILBOX->CxICR = MAILBOX2_C1ICR_INT0_Msk;
+  H2L_MAILBOX->CxICR = MAILBOX1_C1ICR_INT0_Msk;
+
+  ret = ipc_queue_open(g_sf32lb52_bt_env.ipc_port);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "sf32lb52 bt prepare: ipc_queue_open failed: %d\n",
+             ret);
+      return ret;
+    }
+
+  L2H_MAILBOX->CxIER &= ~MAILBOX2_C1IER_INT0_Msk;
+  __DSB();
+
+  up_clean_dcache((uintptr_t)SF32LB52_BT_TX_BUF_ADDR,
+                  (uintptr_t)SF32LB52_BT_TX_BUF_ADDR +
+                  SF32LB52_BT_TX_BUF_SIZE);
+  __DSB();
+  g_sf32lb52_bt_env.queue_open = true;
+  g_sf32lb52_bt_env.rx_enabled = false;
+  syslog(LOG_INFO, "sf32lb52 bt IPC queue armed before LCPU release\n");
+  return OK;
+}
+
 int sf32lb52_bt_controller_enable(void)
 {
   int ret;
@@ -730,6 +809,8 @@ int sf32lb52_bt_controller_enable(void)
 
   if (g_sf32lb52_bt_status != SF32LB52_BT_STATUS_INITED)
     {
+      syslog(LOG_ERR, "sf32lb52 bt enable: bad status %d\n",
+             g_sf32lb52_bt_status);
       return -EPERM;
     }
 
@@ -739,44 +820,29 @@ int sf32lb52_bt_controller_enable(void)
   ret = lcpu_power_on();
   if (ret != 0)
     {
+      syslog(LOG_ERR, "sf32lb52 bt enable: lcpu_power_on failed: %d\n",
+             ret);
       return -EIO;
     }
-
-  /* The L2H_MAILBOX (0x40002000) is on the LPSYS APB bus.  Its CxIER
-   * register is only writable when the LPSYS bus bridge is active.
-   * Wake the LCPU first so the bus bridge is powered, THEN open the
-   * IPC queue (which writes CxIER to unmask the mailbox RX interrupt).
-   * The SDK reference ipc_hw_enable_interrupt2() has the same
-   * HAL_HPAON_WakeCore() before the UNMASK call.
-   */
 
   HAL_HPAON_WakeCore(CORE_ID_LCPU);
   g_sf32lb52_bt_env.wake_held = true;
 
   usleep(500000);
 
-  ret = ipc_queue_open(g_sf32lb52_bt_env.ipc_port);
-  if (ret < 0)
+  if (!g_sf32lb52_bt_env.queue_open)
     {
+      syslog(LOG_ERR, "sf32lb52 bt enable: IPC queue not prepared\n");
       HAL_HPAON_CANCEL_LP_ACTIVE_REQUEST();
       g_sf32lb52_bt_env.wake_held = false;
-      return ret;
+      lcpu_power_off();
+      return -EIO;
     }
 
-  /* Flush H2L TX ring to SRAM immediately after ipc_queue_open so
-   * LCPU sees the reset indices (read_idx=write_idx=0) before it
-   * tries to process any stale data from a previous session.
-   */
-  up_clean_dcache((uintptr_t)SF32LB52_BT_TX_BUF_ADDR,
-                  (uintptr_t)SF32LB52_BT_TX_BUF_ADDR +
-                  SF32LB52_BT_TX_BUF_SIZE);
-  __DSB();
-
-  /* After every lcpu_power_on(), LCPU resets its TX ring write pointer
-   * (write_idx_mirror) to 0 and writes its own boot responses into the
-   * ring.  HCPU's read pointer (read_idx_mirror) may still hold the
-   * non-zero value from the previous session -- dirty in DCache or
-   * stored in SRAM.  If we do not synchronise them:
+  /* The LCPU initializes its TX ring during boot and may publish boot
+   * responses before this wait completes.  The pre-release hook invalidates
+   * the retained header so readiness cannot be inferred from an old ring.
+   * HCPU now synchronizes its read pointer to the fresh producer pointer:
    *
    *   circular_buf_data_len() = wrap(write_idx - read_idx)
    *
@@ -800,7 +866,17 @@ int sf32lb52_bt_controller_enable(void)
     if (ret < 0)
       {
         syslog(LOG_ERR, "sf32lb52 rx ring not ready: %d\n", ret);
+        g_sf32lb52_bt_env.queue_open = false;
+        g_sf32lb52_bt_env.rx_enabled = false;
+        g_sf32lb52_bt_env.rx_work_pending = false;
+        g_sf32lb52_bt_env.rx_worker_running = false;
         ipc_queue_close(g_sf32lb52_bt_env.ipc_port);
+        if (!work_available(&g_sf32lb52_bt_env.rx_work))
+          {
+            work_cancel_sync(HPWORK, &g_sf32lb52_bt_env.rx_work);
+          }
+
+        lcpu_power_off();
         HAL_HPAON_CANCEL_LP_ACTIVE_REQUEST();
         g_sf32lb52_bt_env.wake_held = false;
         return ret;
@@ -813,6 +889,13 @@ int sf32lb52_bt_controller_enable(void)
                     (uintptr_t)SF32LB52_BT_RX_BUF_ADDR +
                     sizeof(*rx_ring));
     __DSB();
+
+    irqstate_t flags = enter_critical_section();
+    L2H_MAILBOX->CxICR = MAILBOX2_C1ICR_INT0_Msk;
+    L2H_MAILBOX->CxIER |= MAILBOX2_C1IER_INT0_Msk;
+    g_sf32lb52_bt_env.rx_enabled = true;
+    __DSB();
+    leave_critical_section(flags);
   }
 
   {
@@ -844,6 +927,7 @@ int sf32lb52_bt_controller_disable(void)
 
   queue_open = g_sf32lb52_bt_env.queue_open;
   g_sf32lb52_bt_env.queue_open = false;
+  g_sf32lb52_bt_env.rx_enabled = false;
   g_sf32lb52_bt_env.rx_work_pending = false;
   g_sf32lb52_bt_env.rx_worker_running = false;
   if (!work_available(&g_sf32lb52_bt_env.rx_work))
@@ -903,6 +987,9 @@ int sf32lb52_host_send_packet(const uint8_t *data, uint16_t len)
   if (g_sf32lb52_bt_status != SF32LB52_BT_STATUS_ENABLED ||
       !g_sf32lb52_bt_env.queue_open)
     {
+      syslog(LOG_ERR, "sf32lb52 bt send: controller not ready "
+             "(status=%d queue_open=%d)\n",
+             g_sf32lb52_bt_status, g_sf32lb52_bt_env.queue_open);
       return -ENODEV;
     }
 
