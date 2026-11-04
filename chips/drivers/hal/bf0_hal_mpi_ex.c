@@ -22,6 +22,9 @@
 
 #include "flash_table.h"
 
+/* V142-FIX: 忙轮询 deadline（定义在 bf0_hal_mpi.c，RAM 运行） */
+extern int HAL_FLASH_TimeoutCheck(void);
+
 #if defined(SF32LB52X)
 #  undef __HAL_ROM_USED
 #  define __HAL_ROM_USED HAL_SECTION(".ramfunc")
@@ -1699,6 +1702,11 @@ __HAL_ROM_USED int HAL_QSPIEX_WRITE_PAGE(FLASH_HandleTypeDef *hflash, uint32_t a
         {
             HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RDSR, addr);
             res = HAL_FLASH_IS_PROG_DONE(hflash);
+            if (HAL_FLASH_TimeoutCheck())
+            {
+                size = 0; goto exit;
+            }
+
         }
         while (!res);
 
@@ -1766,6 +1774,11 @@ __HAL_ROM_USED int HAL_QSPIEX_WRITE_PAGE(FLASH_HandleTypeDef *hflash, uint32_t a
                     HAL_FLASH_WRITE_DLEN(hflash, 1);
                     HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RDSR, 0);
                     res = HAL_FLASH_IS_PROG_DONE(hflash);
+                    if (HAL_FLASH_TimeoutCheck())
+                    {
+                        size = 0; goto exit;
+                    }
+
                 }
                 while (!res);
                 remain -= fill;
@@ -1795,6 +1808,11 @@ __HAL_ROM_USED int HAL_QSPIEX_WRITE_PAGE(FLASH_HandleTypeDef *hflash, uint32_t a
                     HAL_FLASH_WRITE_DLEN(hflash, 1);
                     HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RDSR, 0);
                     res = HAL_FLASH_IS_PROG_DONE(hflash);
+                    if (HAL_FLASH_TimeoutCheck())
+                    {
+                        size = 0; goto exit;
+                    }
+
                 }
                 while (!res);
             }
@@ -1924,6 +1942,11 @@ __HAL_ROM_USED int nor_page_erase(FLASH_HandleTypeDef *hflash, uint32_t addr)
     {
         HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RDSR, addr);
         res = HAL_FLASH_IS_PROG_DONE(hflash);
+        if (HAL_FLASH_TimeoutCheck())
+        {
+            return -1;
+        }
+
     }
     while (!res);
 #endif
@@ -1968,6 +1991,11 @@ __HAL_ROM_USED int HAL_QSPIEX_SECT_ERASE(FLASH_HandleTypeDef *hflash, uint32_t a
         //HAL_FLASH_SET_CMD(hflash, FCMD_RDSR, addr);
         HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RDSR, addr);
         res = HAL_FLASH_IS_PROG_DONE(hflash);
+        if (HAL_FLASH_TimeoutCheck())
+        {
+            ret = -1; goto exit;
+        }
+
     }
     while (!res);
 #endif
@@ -2011,6 +2039,11 @@ __HAL_ROM_USED int HAL_QSPIEX_BLK32_ERASE(FLASH_HandleTypeDef *hflash, uint32_t 
         //HAL_FLASH_SET_CMD(hflash, FCMD_RDSR, addr);
         HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RDSR, addr);
         res = HAL_FLASH_IS_PROG_DONE(hflash);
+        if (HAL_FLASH_TimeoutCheck())
+        {
+            ret = -1; goto exit;
+        }
+
     }
     while (!res);
 
@@ -2059,6 +2092,11 @@ __HAL_ROM_USED int HAL_QSPIEX_BLK64_ERASE(FLASH_HandleTypeDef *hflash, uint32_t 
         //HAL_FLASH_SET_CMD(hflash, FCMD_RDSR, addr);
         HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RDSR, addr);
         res = HAL_FLASH_IS_PROG_DONE(hflash);
+        if (HAL_FLASH_TimeoutCheck())
+        {
+            ret = -1; goto exit;
+        }
+
     }
     while (!res);
 #endif
@@ -2110,6 +2148,11 @@ __HAL_ROM_USED int HAL_QSPIEX_CHIP_ERASE(FLASH_HandleTypeDef *hflash)
         //HAL_FLASH_SET_CMD(hflash, FCMD_RDSR, 0);
         HAL_FLASH_ISSUE_CMD(hflash, SPI_FLASH_CMD_RDSR, 0);
         res = HAL_FLASH_IS_PROG_DONE(hflash);
+        if (HAL_FLASH_TimeoutCheck())
+        {
+            ret = -1; goto exit;
+        }
+
     }
     while (!res);
 #endif
@@ -2416,7 +2459,13 @@ __HAL_ROM_USED void HAL_QSPIEX_FLASH_RESET2(MPI_TypeDef *hmpi)
     hmpi->AR1 = 0;
     hmpi->CMDR1 = 0x66;
 
-    while (!(hmpi->SR & MPI_SR_TCF));
+    while (!(hmpi->SR & MPI_SR_TCF))
+    {
+        if (HAL_FLASH_TimeoutCheck())
+        {
+            break;
+        }
+    }
     hmpi->SCR |= MPI_SCR_TCFC;
 
 
@@ -2431,7 +2480,13 @@ __HAL_ROM_USED void HAL_QSPIEX_FLASH_RESET2(MPI_TypeDef *hmpi)
     hmpi->AR1 = 0;
     hmpi->CMDR1 = 0x99;
 
-    while (!(hmpi->SR & MPI_SR_TCF));
+    while (!(hmpi->SR & MPI_SR_TCF))
+    {
+        if (HAL_FLASH_TimeoutCheck())
+        {
+            break;
+        }
+    }
     hmpi->SCR |= MPI_SCR_TCFC;
 
     HAL_Delay_us(12000);    // delay 12ms
